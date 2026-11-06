@@ -5,8 +5,8 @@
 # version 与 app/version.py 同源，自检会核对两者相等；改版本号时两处一起改。
 
 [project]
-name = "quill"
-version = "1.3.5"
+name = "arcquill"
+version = "1.4.0"
 description = "本地优先的英语生词本桌面程序"
 readme = "README.md"
 requires-python = ">=3.11"
