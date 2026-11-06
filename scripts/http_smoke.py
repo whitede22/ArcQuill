@@ -207,7 +207,7 @@ RELAY_REPLIES = {
 
 SAMPLE_REPORT = {
     "report_schema_version": 1,
-    "quill_version": "9.9.9",
+    "arcquill_version": "9.9.9",
     "generated_at": "2026-10-29 17:00",
     "period_days": 30,
     "event_total": 12,

@@ -1,4 +1,4 @@
-"""Quill 使用报告的中转函数（腾讯云函数 SCF，Python 运行时）。
+"""ArcQuill 使用报告的中转函数（腾讯云函数 SCF，Python 运行时）。
 
 客户端只发一个 HTTPS 请求，SMTP 授权码住在这里的环境变量，不进客户端。
 打包好的 exe 能被拆开，任何写进客户端的凭据都等于公开。
@@ -129,17 +129,22 @@ def _validate(data: dict) -> str:
 
 def _build_message(data: dict) -> EmailMessage:
     report = data["report"]
-    version = str(report.get("quill_version", ""))[:20]
+    # 两个键都认：改名后的客户端写 `arcquill_version`，改名前的客户端（以及还没
+    # 升级的那批）写 `quill_version`。只认新键的话，旧客户端发来的报告主题里版本
+    # 会是空的，而版本恰恰是这类数据文件唯一的对照依据。
+    version = str(
+        report.get("arcquill_version") or report.get("quill_version") or ""
+    )[:20]
     stamp = str(report.get("generated_at", ""))[:20]
     msg = EmailMessage()
-    msg["Subject"] = f"[Quill 使用报告] v{version} {stamp}"
+    msg["Subject"] = f"[ArcQuill 使用报告] v{version} {stamp}"
     msg["From"] = os.environ["SMTP_USER"]
     msg["To"] = ", ".join(_recipients())
     msg["Date"] = formatdate(localtime=True)
-    msg["Message-ID"] = make_msgid(domain="quill.local")
+    msg["Message-ID"] = make_msgid(domain="arcquill.local")
     msg.set_content(_body_text(data))
 
-    name = f"quill_usage_report_{stamp[:10] or 'unknown'}.json"
+    name = f"arcquill_usage_report_{stamp[:10] or 'unknown'}.json"
     msg.add_attachment(
         json.dumps(report, ensure_ascii=False, indent=2).encode("utf-8"),
         maintype="application",
@@ -150,7 +155,7 @@ def _build_message(data: dict) -> EmailMessage:
 
 
 def _body_text(data: dict) -> str:
-    lines = ["这是 Quill 提交的一份本地使用报告，完整内容在附件里。", ""]
+    lines = ["这是 ArcQuill 提交的一份本地使用报告，完整内容在附件里。", ""]
     lines.extend(f"- {line}" for line in data["summary"])
     return "\n".join(lines) + "\n"
 

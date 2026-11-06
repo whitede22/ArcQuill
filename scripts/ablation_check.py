@@ -50,8 +50,8 @@ ROOT = Path(__file__).resolve().parents[1]
 PY = sys.executable
 
 # 临时目录前缀表**只留一份定义**（`clean_temp.py`）。这里曾经各写一份：探针的
-# 清理只认 `quill_ablate_*`，于是 selfcheck / gui_smoke / lock_check 这三个
-# 子套件崩溃时漏下的 `quill_check_*` / `quill_lock_*` 完全不在它的视野里
+# 清理只认 `arcquill_ablate_*`，于是 selfcheck / gui_smoke / lock_check 这三个
+# 子套件崩溃时漏下的 `arcquill_check_*` / `arcquill_lock_*` 完全不在它的视野里
 # ——而「判据覆盖的目标恰好是被漏掉的那一类」正是本项目反复踩到的形态。
 sys.path.insert(0, str(ROOT / "scripts"))
 from clean_temp import PREFIXES as TEMP_PREFIXES  # noqa: E402
@@ -667,7 +667,7 @@ _BG_PANEL_PROBE = """
 import sys, os, tempfile; sys.path.insert(0,'.')
 os.environ['QT_QPA_PLATFORM'] = 'offscreen'
 from pathlib import Path
-tmp = Path(tempfile.mkdtemp(prefix='quill_ablate_'))
+tmp = Path(tempfile.mkdtemp(prefix='arcquill_ablate_'))
 import atexit, shutil; atexit.register(shutil.rmtree, tmp, True)
 os.environ['QUILL_HOME'] = str(tmp)
 from PySide6.QtWidgets import QApplication
@@ -700,7 +700,7 @@ _BG_VEIL_PROBE = """
 import sys, os, tempfile; sys.path.insert(0,'.')
 os.environ['QT_QPA_PLATFORM'] = 'offscreen'
 from pathlib import Path
-tmp = Path(tempfile.mkdtemp(prefix='quill_ablate_'))
+tmp = Path(tempfile.mkdtemp(prefix='arcquill_ablate_'))
 import atexit, shutil; atexit.register(shutil.rmtree, tmp, True)
 os.environ['QUILL_HOME'] = str(tmp)
 from PySide6.QtWidgets import QApplication
@@ -737,7 +737,7 @@ _THEME_PROBE = """
 import sys, os, tempfile; sys.path.insert(0,'.')
 os.environ['QT_QPA_PLATFORM'] = 'offscreen'
 from pathlib import Path
-tmp = Path(tempfile.mkdtemp(prefix='quill_ablate_'))
+tmp = Path(tempfile.mkdtemp(prefix='arcquill_ablate_'))
 import atexit, shutil; atexit.register(shutil.rmtree, tmp, True)
 os.environ['QUILL_HOME'] = str(tmp)
 from PySide6.QtWidgets import QApplication
@@ -769,7 +769,7 @@ _THEME_CANCEL_PROBE = """
 import sys, os, tempfile; sys.path.insert(0,'.')
 os.environ['QT_QPA_PLATFORM'] = 'offscreen'
 from pathlib import Path
-tmp = Path(tempfile.mkdtemp(prefix='quill_ablate_'))
+tmp = Path(tempfile.mkdtemp(prefix='arcquill_ablate_'))
 import atexit, shutil; atexit.register(shutil.rmtree, tmp, True)
 os.environ['QUILL_HOME'] = str(tmp)
 from PySide6.QtWidgets import QApplication
@@ -798,7 +798,7 @@ _DROP_PROBE = """
 import sys, os, tempfile; sys.path.insert(0,'.')
 os.environ['QT_QPA_PLATFORM'] = 'offscreen'
 from pathlib import Path
-tmp = Path(tempfile.mkdtemp(prefix='quill_ablate_'))
+tmp = Path(tempfile.mkdtemp(prefix='arcquill_ablate_'))
 import atexit, shutil; atexit.register(shutil.rmtree, tmp, True)
 os.environ['QUILL_HOME'] = str(tmp)
 from PySide6.QtWidgets import QApplication
@@ -862,7 +862,7 @@ _DEEP_TEXT_PROBE = """
 import sys, os, tempfile; sys.path.insert(0,'.')
 os.environ['QT_QPA_PLATFORM'] = 'offscreen'
 from pathlib import Path
-tmp = Path(tempfile.mkdtemp(prefix='quill_ablate_'))
+tmp = Path(tempfile.mkdtemp(prefix='arcquill_ablate_'))
 import atexit, shutil; atexit.register(shutil.rmtree, tmp, True)
 os.environ['QUILL_HOME'] = str(tmp)
 from PySide6.QtWidgets import QApplication, QLabel
@@ -905,7 +905,7 @@ _MAIN_WINDOW_SETUP = """
 import sys, os, tempfile; sys.path.insert(0,'.')
 os.environ['QT_QPA_PLATFORM'] = 'offscreen'
 from pathlib import Path
-tmp = Path(tempfile.mkdtemp(prefix='quill_ablate_'))
+tmp = Path(tempfile.mkdtemp(prefix='arcquill_ablate_'))
 import atexit, shutil; atexit.register(shutil.rmtree, tmp, True)
 os.environ['QUILL_HOME'] = str(tmp)
 from PySide6.QtWidgets import QApplication
@@ -989,7 +989,7 @@ _A26_PROBE = """
 import sys, os, tempfile; sys.path.insert(0,'.')
 os.environ['QT_QPA_PLATFORM'] = 'offscreen'
 from pathlib import Path
-tmp = Path(tempfile.mkdtemp(prefix='quill_ablate_'))
+tmp = Path(tempfile.mkdtemp(prefix='arcquill_ablate_'))
 import atexit, shutil; atexit.register(shutil.rmtree, tmp, True)
 os.environ['QUILL_HOME'] = str(tmp)
 from PySide6.QtWidgets import QApplication
@@ -1015,7 +1015,7 @@ _A27_PROBE = """
 import sys, os, tempfile; sys.path.insert(0,'.')
 os.environ['QT_QPA_PLATFORM'] = 'offscreen'
 from pathlib import Path
-tmp = Path(tempfile.mkdtemp(prefix='quill_ablate_'))
+tmp = Path(tempfile.mkdtemp(prefix='arcquill_ablate_'))
 import atexit, shutil; atexit.register(shutil.rmtree, tmp, True)
 os.environ['QUILL_HOME'] = str(tmp)
 from PySide6.QtWidgets import QApplication
@@ -1033,7 +1033,7 @@ _A28_PROBE = """
 import sys, os, tempfile; sys.path.insert(0,'.')
 os.environ['QT_QPA_PLATFORM'] = 'offscreen'
 from pathlib import Path
-tmp = Path(tempfile.mkdtemp(prefix='quill_ablate_'))
+tmp = Path(tempfile.mkdtemp(prefix='arcquill_ablate_'))
 import atexit, shutil; atexit.register(shutil.rmtree, tmp, True)
 os.environ['QUILL_HOME'] = str(tmp)
 from PySide6.QtWidgets import QApplication, QLabel
@@ -1097,7 +1097,7 @@ from pathlib import Path
 from app.core.db import connect, init_db
 from app.core.repository import Repository
 from app.core.models import Phrase
-tmp = Path(tempfile.mkdtemp(prefix="quill_ablate_"))
+tmp = Path(tempfile.mkdtemp(prefix="arcquill_ablate_"))
 import atexit, shutil; atexit.register(shutil.rmtree, tmp, True)
 c = connect(tmp/'t.db'); init_db(c); r = Repository(c)
 for text in ('run out of', 'trunk road', 'runway model', 'a long run'):
@@ -1114,7 +1114,7 @@ from pathlib import Path
 from app.core.db import connect, init_db
 from app.core.repository import Repository
 from app.core.models import Phrase
-tmp = Path(tempfile.mkdtemp(prefix="quill_ablate_"))
+tmp = Path(tempfile.mkdtemp(prefix="arcquill_ablate_"))
 import atexit, shutil; atexit.register(shutil.rmtree, tmp, True)
 c = connect(tmp/'t.db'); init_db(c); r = Repository(c)
 r.add_phrase(Phrase(phrase='be in charge of', gloss_zh='负责（先收的那份）',
@@ -1180,7 +1180,7 @@ from app.core.db import connect, init_db
 from app.core.repository import Repository
 from app.core.models import Entry
 from app.core import review
-tmp = Path(tempfile.mkdtemp(prefix="quill_ablate_"))
+tmp = Path(tempfile.mkdtemp(prefix="arcquill_ablate_"))
 import atexit, shutil; atexit.register(shutil.rmtree, tmp, True)
 c = connect(tmp/'t.db'); init_db(c); r = Repository(c)
 r.upsert(Entry(lemma='newword', definition_zh='新词'))
@@ -1226,7 +1226,7 @@ from pathlib import Path
 from app.core.db import connect, init_db
 from app.core.repository import Repository
 from app.core.models import Entry
-tmp = Path(tempfile.mkdtemp(prefix="quill_ablate_"))
+tmp = Path(tempfile.mkdtemp(prefix="arcquill_ablate_"))
 import atexit, shutil; atexit.register(shutil.rmtree, tmp, True)
 c = connect(tmp/'t.db'); init_db(c); r = Repository(c)
 r.upsert(Entry(lemma='ubiquitous', definition_en='x', definition_zh='无处不在的'))
@@ -1259,7 +1259,7 @@ from app.core.repository import Repository
 from app.core.models import Entry
 from app.core.dictionary import DictionaryService
 from app.providers.mock import MockProvider
-tmp = Path(tempfile.mkdtemp(prefix="quill_ablate_"))
+tmp = Path(tempfile.mkdtemp(prefix="arcquill_ablate_"))
 import atexit, shutil; atexit.register(shutil.rmtree, tmp, True)
 c = connect(tmp/'t.db'); init_db(c); r = Repository(c)
 # 造一个「旧版提示词生成」的词条，再看服务层标不标陈旧
@@ -1287,7 +1287,7 @@ from app.core.models import Entry
 from app.core.importer import parse_text, run_import
 from app.core.dictionary import DictionaryService
 from app.providers.mock import MockProvider
-tmp = Path(tempfile.mkdtemp(prefix="quill_ablate_"))
+tmp = Path(tempfile.mkdtemp(prefix="arcquill_ablate_"))
 import atexit, shutil; atexit.register(shutil.rmtree, tmp, True)
 c = connect(tmp/'t.db'); init_db(c); r = Repository(c)
 r.upsert(Entry(lemma='alpha', definition_en='a', notes='我自己写的'))
@@ -1358,7 +1358,7 @@ print('有单实例锁' if hasattr(m, 'acquire_instance_lock') else '锁被抽�
 import sys, os, tempfile; sys.path.insert(0,'.')
 os.environ['QT_QPA_PLATFORM'] = 'offscreen'
 from pathlib import Path
-tmp = Path(tempfile.mkdtemp(prefix='quill_ablate_'))
+tmp = Path(tempfile.mkdtemp(prefix='arcquill_ablate_'))
 import atexit, shutil; atexit.register(shutil.rmtree, tmp, True)
 os.environ['QUILL_HOME'] = str(tmp)
 from PySide6.QtWidgets import QApplication
@@ -1388,7 +1388,7 @@ print(f'窗口留白处像素={px}（配的图是纯品红 255,0,255）')
 import sys, os, tempfile; sys.path.insert(0,'.')
 os.environ['QT_QPA_PLATFORM'] = 'offscreen'
 from pathlib import Path
-tmp = Path(tempfile.mkdtemp(prefix='quill_ablate_'))
+tmp = Path(tempfile.mkdtemp(prefix='arcquill_ablate_'))
 import atexit, shutil; atexit.register(shutil.rmtree, tmp, True)
 os.environ['QUILL_HOME'] = str(tmp)
 from PySide6.QtWidgets import QApplication

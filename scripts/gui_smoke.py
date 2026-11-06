@@ -19,7 +19,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-_GUI_HOME = tempfile.mkdtemp(prefix="quill_gui_")
+_GUI_HOME = tempfile.mkdtemp(prefix="arcquill_gui_")
 os.environ["QUILL_HOME"] = _GUI_HOME
 
 # 整轮兜底超时的上限。正常一轮在一分钟以内（最后一个阶段排在 26s，它自己再跑
@@ -37,7 +37,7 @@ def _clean_home() -> None:
     2.6 GB，把系统盘写满，症状是 Bash 报 `ENOSPC`——看起来像工具坏了）。
     改为重试 + `gc.collect()`，仍失败就打印警告，不装作已经删掉。
     （被外部强杀时 `atexit` 不会执行，那种情况由 `clean_temp.py` 兜底——它已登记
-    `quill_gui_*` 前缀。）
+    `arcquill_gui_*` 前缀。）
     """
     for _ in range(3):
         gc.collect()
@@ -233,6 +233,27 @@ def _chips_equal_width(observed) -> bool:
     return widths[0] >= (observed.get("自然宽度上限") or 0)
 
 
+def _opaque_luma(image: QImage) -> int:
+    """不透明像素的平均亮度，取不到像素时返回 -1。
+
+    用来分辨顶栏字标用的是哪一套素材：深色图形在 40 上下，白色图形在 230 以上。
+    只验「pixmap 非空」是不够的——两套素材同时存在、却始终加载同一套，也是
+    「深色主题下字标看不见」这个故障的另一种写法。
+    """
+    if image.isNull() or image.width() <= 0 or image.height() <= 0:
+        return -1
+    total = count = 0
+    step_y = max(1, image.height() // 20)
+    step_x = max(1, image.width() // 40)
+    for y in range(0, image.height(), step_y):
+        for x in range(0, image.width(), step_x):
+            pixel = image.pixelColor(x, y)
+            if pixel.alpha() > 200:
+                total += (pixel.red() * 299 + pixel.green() * 587 + pixel.blue() * 114) // 1000
+                count += 1
+    return total // count if count else -1
+
+
 def _strip_delta(image: QImage, y: int, x0: int, x1: int) -> int:
     """一条横线上相邻像素的最大通道差。硬边越大，模糊后越小。"""
     worst = 0
@@ -284,7 +305,7 @@ def _verdicts(observed: dict, table: dict) -> list[tuple[str, bool, str]]:
 # 每项观测的判定标准。任何新增观测都必须在此登记，否则判定为失败——
 # 这是刻意的：没有判定标准的观测等于没测。
 EXPECT: dict = {
-    "窗口标题": "Quill · 英语生词本",
+    "窗口标题": "ArcQuill · 英语生词本",
     "接入状态标签": "离线示例模式（仅演示词条）",
     "查询后条数": 1,
     "详情区渲染词条": "ubiquitous",
@@ -467,6 +488,15 @@ EXPECT: dict = {
         == round(theme_mod.palette("ink")["veil_floor"]["panel"] * 255 / 100)
     ),
     "背景蒙版档位属性": "medium",
+    # 顶栏字标两套素材各管一半主题：深色图形配浅色主题，白色图形配深色主题。
+    # 亮度是分工的证据。`-1` 表示根本没取到像素，素材缺失或没设置时会出现。
+    "各主题字标亮度": (
+        lambda v: isinstance(v, list)
+        and len(v) == len(theme_mod.theme_ids())
+        and all(x > 0 for x in v)
+        and v[0] < 120
+        and v[-1] > 140
+    ),
     # 设置界面：档位顺序与默认档。顺序反了会让「明显」看起来最含蓄。
     "背景透出档位顺序": ["soft", "medium", "bold"],
     "背景透出默认档": "medium",
@@ -876,7 +906,7 @@ EXPECT: dict = {
     # 否则右边渲染着刚查到的词、左栏一条都不选中，而状态栏照说「已收录」。
     "查词途中切到词组收藏，结果回来时自动切回生词本": "words",
     # 欢迎页 / 教程（welcome_check）。
-    "欢迎弹窗标题": "欢迎来到 Quill",
+    "欢迎弹窗标题": "欢迎来到 ArcQuill",
     "欢迎弹窗署名": "made by wtd22",
     "欢迎弹窗功能点数": 5,
     "教程步数": 4,
@@ -886,7 +916,7 @@ EXPECT: dict = {
     "版本已最新不再弹": True,
     # 统计告知页（analytics_check）。两条硬边界：看过说明不等于同意；
     # 关掉窗口既不是同意也不是拒绝（下次还会问）。
-    "告知页标题": "帮助我们改进 Quill",
+    "告知页标题": "帮助我们改进 ArcQuill",
     "告知页按钮": lambda v: v == ["暂不参与", "知道了，继续使用"],
     "告知页默认没表态": True,
     "点「知道了」记为同意": True,
@@ -1838,7 +1868,7 @@ def main() -> int:
             # 抽查两条：CSV 的样例必须真带 BOM、JSON 的样例必须真带格式标识。
             # 这样「样例来自真实导出函数」这件事本身是可验的，而不是靠注释声明。
             results["CSV 样例带 BOM"] = samples["csv"].startswith("\ufeff")
-            results["JSON 样例带格式标识"] = '"quill-entries"' in samples["json"]
+            results["JSON 样例带格式标识"] = '"arcquill-entries"' in samples["json"]
         finally:
             help_dlg.deleteLater()
 
@@ -1846,7 +1876,7 @@ def main() -> int:
         # 上面那几条验的是「对话框长什么样」，这里验的是「点下去真的能落盘」。
         import tempfile as _tf
 
-        out_dir = Path(_tf.mkdtemp(prefix="quill_export_"))
+        out_dir = Path(_tf.mkdtemp(prefix="arcquill_export_"))
         _tf_atexit = __import__("atexit")
 
         def _clean_out_dir() -> None:
@@ -2127,6 +2157,7 @@ def main() -> int:
         #    或某处把颜色写死了，这个字段照样是对的。
         shades: list[tuple] = []
         accents: list[str] = []
+        brands: list[int] = []
         for theme_id in theme_mod.theme_ids():
             window._apply_theme(theme_id)
             settle()
@@ -2144,8 +2175,12 @@ def main() -> int:
             accents.append(
                 window.btn_query.palette().color(QPalette.ColorRole.Button).name()
             )
+            # 字标是按主题深浅选素材的，这里把每一套实际加载到的亮度记下来：
+            # 浅色主题该拿到深色图形，深色主题该拿到白色图形。
+            brands.append(_opaque_luma(window.brand.pixmap().toImage()))
         results["各主题强调色"] = accents
         results["各主题窗口底色"] = [list(shade) for shade in shades]
+        results["各主题字标亮度"] = brands
         results["浅色主题的窗口底色确实浅"] = shades[0]
         results["深色主题的窗口底色确实深"] = shades[-1]
 
@@ -2548,7 +2583,7 @@ def main() -> int:
         real_exec2 = sm.ReportDialog.exec
         sm.report.build_report = lambda *a, **k: {
             "report_schema_version": 1,
-            "quill_version": "9.9.9",
+            "arcquill_version": "9.9.9",
             "generated_at": "2026-10-29 17:00",
             "period_days": 30,
             "event_total": 3,
@@ -2577,7 +2612,7 @@ def main() -> int:
             window.config["theme"],
             {
                 "report_schema_version": 1,
-                "quill_version": "9.9.9",
+                "arcquill_version": "9.9.9",
                 "generated_at": "2026-10-29 17:00",
                 "period_days": 30,
                 "event_total": 3,

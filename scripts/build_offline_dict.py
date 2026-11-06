@@ -1,4 +1,4 @@
-"""构建 Quill 使用的离线词库（数据源：ECDICT）。
+"""构建 ArcQuill 使用的离线词库（数据源：ECDICT）。
 
 ## 为什么需要「构建」这一步，而不是直接分发 ECDICT 原库
 
@@ -554,7 +554,7 @@ def build(
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="构建 Quill 离线词库")
+    parser = argparse.ArgumentParser(description="构建 ArcQuill 离线词库")
     parser.add_argument("--source", type=Path, required=True, help="ECDICT 的 ecdict.sqlite")
     parser.add_argument("--examples", type=Path, default=None, help="例句库 examples.sqlite")
     parser.add_argument("--out", type=Path, required=True, help="输出的离线词库路径")

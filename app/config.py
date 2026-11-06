@@ -27,28 +27,31 @@ from . import atomic
 from .theme_meta import BG_VEIL_DEFAULT, THEME_DEFAULT, theme_id_of, veil_level
 
 # 软件名。窗口标题、应用名、数据目录、exe 名都从这里派生，避免「同一属性
-# 有多份定义」。旧名 Lexicon 已于 2026-10 改为 Quill。
-APP_NAME = "Quill"
+# 有多份定义」。改名历史：Lexicon → Quill（2026-10）→ ArcQuill（2026-11）。
+APP_NAME = "ArcQuill"
 
-# 数据目录。优先 QUILL_HOME（新名），其次 LEXICON_HOME（旧名，向后兼容），
-# 默认 ~/.quill。旧版本把数据放在 ~/.lexicon，首次启动由 migrate_legacy_home()
-# 复制过来（保留旧目录作备份）。
+# 数据目录。优先 ARCQUILL_HOME，其次 QUILL_HOME 与 LEXICON_HOME（旧名，向后
+# 兼容），默认 ~/.arcquill。更早版本的目录由 migrate_legacy_home() 搬过来。
 APP_DIR = Path(
-    os.environ.get("QUILL_HOME")
+    os.environ.get("ARCQUILL_HOME")
+    or os.environ.get("QUILL_HOME")
     or os.environ.get("LEXICON_HOME")
-    or (Path.home() / ".quill")
+    or (Path.home() / ".arcquill")
 )
 CONFIG_PATH = APP_DIR / "config.json"
 KEY_PATH = APP_DIR / "api_key.bin"
-DB_PATH = APP_DIR / "quill.db"
+DB_PATH = APP_DIR / "arcquill.db"
 # 本地使用统计的数据库。**刻意与词库分开**：统计写失败、被锁、被用户删掉，
 # 都不该碰到生词本；反过来，备份或导出词库时也不会把统计数据一起带走。
 ANALYTICS_PATH = APP_DIR / "analytics.db"
 
-# 旧数据目录与旧数据库文件名（迁移用）。它们只在这里定义一份，迁移逻辑与
-# 自检都从这取值，避免「改了一处忘了另一处」。
-LEGACY_HOME = Path.home() / ".lexicon"
-LEGACY_DB_NAME = "lexicon.db"
+# 旧数据目录与各自的数据库文件名（迁移用）。按「新 → 旧」排列：两代目录同时
+# 存在时优先搬最近的一代。它们只在这里定义一份，迁移逻辑与自检都从这取值，
+# 避免「改了一处忘了另一处」。
+LEGACY_HOMES: tuple[tuple[str, str], ...] = (
+    (".quill", "quill.db"),
+    (".lexicon", "lexicon.db"),
+)
 
 DEFAULT_CONFIG: dict = {
     "provider": "openai-compat",
@@ -118,30 +121,85 @@ RECENT_BACKGROUNDS_MAX = 6
 DEFAULT_TIMEOUT = float(DEFAULT_CONFIG["timeout"])
 
 
-def migrate_legacy_home() -> bool:
-    """把旧版本的数据目录 ~/.lexicon 迁移到 ~/.quill。
+def _db_has_entries(path: Path) -> bool:
+    """只读打开数据库，确认里面真的有词条表。
 
-    只在「旧目录存在、新目录还不存在、且用户没有通过环境变量指定数据目录」时
-    迁移：复制整个目录（含 quill 之前的 config.json / api_key.bin / lexicon.db），
-    再把数据库文件名 lexicon.db 改成 quill.db。旧目录**保留不删**，作为备份。
+    比「文件存在且非空」严：复制中断留下半个文件时，前者照样返回真，用户会在
+    新目录里得到一个打不开的库，而旧目录已被删掉。
+    """
+    import sqlite3
+
+    try:
+        conn = sqlite3.connect(f"file:{path.as_posix()}?mode=ro", uri=True)
+    except sqlite3.Error:
+        return False
+    try:
+        row = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='entries'"
+        ).fetchone()
+        return row is not None
+    except sqlite3.Error:
+        return False
+    finally:
+        conn.close()
+
+
+def _migrate_from(source: Path, db_name: str) -> bool:
+    """把 `source` 整个搬到 APP_DIR。成功才删源目录。"""
+    try:
+        APP_DIR.mkdir(parents=True, exist_ok=True)
+        for item in source.iterdir():
+            target = APP_DIR / item.name
+            if item.is_dir():
+                shutil.copytree(item, target, dirs_exist_ok=True)
+            elif not target.exists():
+                shutil.copy2(item, target)
+        old_db = APP_DIR / db_name
+        if old_db.exists() and old_db != DB_PATH:
+            old_db.replace(DB_PATH)
+    except OSError:
+        return False
+
+    # 源里有库就必须验得过去；源里本来没有库（只配过设置、没查过词）则跳过。
+    if (source / db_name).exists() and not _db_has_entries(DB_PATH):
+        # 校验不过就把刚搬过来的那份删掉。留着它的后果不是「多一个坏文件」：
+        # 下次启动看到 DB_PATH 已存在就直接跳过迁移，然后去打开这个打不开的库，
+        # 而用户真正的词库还好端端躺在旧目录里——表现为「升级后词全没了」。
+        DB_PATH.unlink(missing_ok=True)
+        return False
+    # 校验通过再删。删失败不算迁移失败：数据已经在新目录里了，旧目录留着只是
+    # 多占一份空间，下次启动会因为 DB_PATH 已存在而直接跳过。
+    shutil.rmtree(source, ignore_errors=True)
+    return True
+
+
+def migrate_legacy_home() -> bool:
+    """把旧版本的数据目录迁移到 ~/.arcquill。
+
+    只在「用户没有通过环境变量指定数据目录」且新目录里还没有词库时执行。依次
+    尝试 ~/.quill（上一代）与 ~/.lexicon（更早），找到第一个存在的就搬，搬完
+    校验词条表，通过后删除旧目录。
+
+    **这一版起旧目录不再保留。** 前两代迁移都是复制完就停手，结果是用户目录里
+    一年后还躺着 ~/.lexicon；用户看到旧名字问「为什么还有这个」，比丢一次便利
+    更麻烦。代价是不可回退，因此校验放在了删除之前。
 
     - 返回是否发生了迁移。
     - 失败返回 False 但不抛异常：数据还在旧目录，下次启动会再试。宁可少迁一次，
       也不在迁移失败时把用户挡在启动之外——迁移是便利，不该变成故障源。
     """
-    if APP_DIR != Path.home() / ".quill":
+    if APP_DIR != Path.home() / ".arcquill":
         return False  # 用户显式指定了数据目录，不擅自迁移
-    if not LEGACY_HOME.is_dir() or APP_DIR.exists():
+    if DB_PATH.exists():
         return False
-    try:
-        shutil.copytree(LEGACY_HOME, APP_DIR)
-        old_db = APP_DIR / LEGACY_DB_NAME
-        new_db = APP_DIR / "quill.db"
-        if old_db.exists() and not new_db.exists():
-            old_db.rename(new_db)
-        return True
-    except OSError:
-        return False
+    for name, db_name in LEGACY_HOMES:
+        source = Path.home() / name
+        if not source.is_dir():
+            continue
+        # 找到了就不再往下试更旧的一代：迁移失败时继续搬更旧的数据，等于用
+        # 一份更旧的词库覆盖用户最近一次的记录。
+        return _migrate_from(source, db_name)
+    return False
 
 
 def ensure_dir() -> None:

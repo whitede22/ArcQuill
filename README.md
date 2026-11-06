@@ -1,10 +1,10 @@
-# Quill · 英语生词本
+# ArcQuill · 英语生词本
 
 一个装在 Windows 上的生词本。敲一个词回车就存下，释义、例句、搭配跟着进来，不用再抄第二遍。断网也能查，包里带着一本 76.9 万词的离线词典。
 
 生词都在自己电脑上的一个 `.db` 文件里，拷走就带走。换台机器不会什么都不剩。
 
-v1.3.4（2026-10-29）：提交报告那一块改用强调色标出，提交前要填一个称呼，可以再附一句建议。使用报告多记了查词来源、出错类别、复习的四档分布与打开次数。[下载免安装版](https://github.com/whitede22/Quill/releases/latest) · [更新记录](https://github.com/whitede22/Quill/blob/main/CHANGELOG.md)
+v1.4.0（2026-11-06）：软件改名为 ArcQuill，图标与窗口字标换成新版。数据目录迁到 `~/.arcquill`，首次启动自动搬过去，此前导出的文件仍然认得。[下载免安装版](https://github.com/whitede22/Quill/releases/latest) · [更新记录](https://github.com/whitede22/Quill/blob/main/CHANGELOG.md)
 
 ## 界面预览
 
@@ -151,7 +151,7 @@ python -m venv .venv
 ```bash
 .venv/Scripts/python.exe scripts/build_offline_dict.py \
     --source <ecdict.sqlite> --examples <examples.sqlite> \
-    --out "%USERPROFILE%\.quill\offline_dict.db" --tier core
+    --out "%USERPROFILE%\.arcquill\offline_dict.db" --tier core
 ```
 
 离线词典有它的边界，界面上会照实说。它没有同义语，ECDICT 本身就是词和释义的对照表，不含近义词关系。例句只覆盖不到两成词条。音标是 ECDICT 的老式标注，不是严格 IPA。词组在构建阶段就被排除了，两种档位都只收 `[a-z-]` 组成的单条词，全量档 76.9 万条里含空格的是 0 条。缺项提示按来源能力过滤，所以离线词条底下不会因为「结构上就没有」而挂一句没用的「缺少同义语」。
@@ -160,18 +160,18 @@ python -m venv .venv
 
 | 内容 | 路径 |
 |---|---|
-| 生词数据库 | `%USERPROFILE%\.quill\quill.db` |
-| 配置文件 | `%USERPROFILE%\.quill\config.json` |
-| 界面状态 | `%USERPROFILE%\.quill\ui.ini` |
-| 加密密钥 | `%USERPROFILE%\.quill\api_key.bin` |
-| 离线词典（可选覆盖） | `%USERPROFILE%\.quill\offline_dict.db` |
-| 导入失败清单（导入不顺利时才产生） | `%USERPROFILE%\.quill\import_failed_*.txt` |
+| 生词数据库 | `%USERPROFILE%\.arcquill\arcquill.db` |
+| 配置文件 | `%USERPROFILE%\.arcquill\config.json` |
+| 界面状态 | `%USERPROFILE%\.arcquill\ui.ini` |
+| 加密密钥 | `%USERPROFILE%\.arcquill\api_key.bin` |
+| 离线词典（可选覆盖） | `%USERPROFILE%\.arcquill\offline_dict.db` |
+| 导入失败清单（导入不顺利时才产生） | `%USERPROFILE%\.arcquill\import_failed_*.txt` |
 
 设 `QUILL_HOME` 可以整体搬到别处（旧名 `LEXICON_HOME` 还认）。
 
 数据库结构变化时不用手动迁移。普通表的新列靠启动时比对 `PRAGMA table_info` 补齐，FTS5 虚表不支持 `ALTER`，列集变了只能整表重建，重建的来源是 `entries` 表本身，不丢数据。两条路径都比对真实表结构，不看 `meta.schema_version`，那个版本号只说明「写到过哪一版」。
 
-备份点一下，另存一份完整的 `.db` 文件。还原时关掉程序，用备份覆盖 `quill.db` 就行。备份会先写临时文件、过 `PRAGMA integrity_check` 再原子替换。
+备份点一下，另存一份完整的 `.db` 文件。还原时关掉程序，用备份覆盖 `arcquill.db` 就行。备份会先写临时文件、过 `PRAGMA integrity_check` 再原子替换。
 
 ## 快捷键
 
@@ -191,13 +191,13 @@ python -m venv .venv
 .venv/Scripts/python.exe build.py
 ```
 
-产物在 `dist/Quill/`，整个目录拷到别的机器双击 `Quill.exe` 就能跑，约 145 MB，其中 64.8 MB 是那本离线词典，其余是 Qt 运行时和 Python。
+产物在 `dist/ArcQuill/`，整个目录拷到别的机器双击 `ArcQuill.exe` 就能跑，约 145 MB，其中 64.8 MB 是那本离线词典，其余是 Qt 运行时和 Python。
 
 打包完有两步验证，不做的话裁剪造成的缺件不会暴露。
 
 ```bash
-"dist/Quill/Quill.exe" --selfcheck
-.venv/Scripts/python.exe scripts/check_trim.py dist/Quill
+"dist/ArcQuill/ArcQuill.exe" --selfcheck
+.venv/Scripts/python.exe scripts/check_trim.py dist/ArcQuill
 ```
 
 `--selfcheck` 是无界面模式（打包成无控制台程序后 stdout 看不见），结果同时写进 exe 同级的 `selfcheck_result.txt`，用退出码反映成败。它跑在临时数据目录里，不碰你的生词本。

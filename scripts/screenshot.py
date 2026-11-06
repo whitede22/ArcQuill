@@ -127,7 +127,7 @@ def _sanitize_settings_paths(dialog) -> None:
             continue
         head = text.split("\n", 1)[0]
         label.setText(
-            head + "\n位置：" + r"C:\Program Files\Quill\assets\offline_dict.db"
+            head + "\n位置：" + r"C:\Program Files\ArcQuill\assets\offline_dict.db"
         )
 
 

@@ -42,7 +42,7 @@ def check(name: str, condition: bool, detail: str = "") -> None:
 
 
 def main() -> int:
-    home = tempfile.mkdtemp(prefix="quill_lock_")
+    home = tempfile.mkdtemp(prefix="arcquill_lock_")
     # 用完删掉：见 selfcheck.py 里那段关于 3763 个残留目录的说明。
     os.environ["QUILL_HOME"] = home  # 必须在导入 app.config 之前设置
 
@@ -91,7 +91,7 @@ def main() -> int:
             holder.wait(timeout=10)
         # **不要 ignore_errors=True**：那个子进程刚退出，它的锁文件句柄可能
         # 还差一点点没释放，一次 rmtree 会失败。而 ignore_errors 会让「删干净了」
-        # 与「静默没删」长得一模一样——实测就是这么攒下 440 个 quill_lock_*
+        # 与「静默没删」长得一模一样——实测就是这么攒下 440 个 arcquill_lock_*
         # 目录的（每个 1.8 MB 的目录项占用，看着不多，但架不住每次跑都留一个）。
         # 重试几次，仍失败就打印出来。
         for _attempt in range(5):

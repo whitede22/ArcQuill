@@ -30,7 +30,7 @@ from .theme import stylesheet
 # 教程版本号。每次大改教程内容就 +1。文案措辞的小改不算，整页重写才算。
 CURRENT_ONBOARD_VERSION = 3
 
-_WELCOME_TITLE = "欢迎来到 Quill"
+_WELCOME_TITLE = "欢迎来到 ArcQuill"
 _WELCOME_SUBTITLE = "回车查词，顺手收藏。"
 _MADE_BY = "made by wtd22"
 
@@ -149,7 +149,7 @@ class OnboardingDialog(QDialog):
         v.setContentsMargins(0, 0, 0, 0)
         v.setSpacing(0)
 
-        title = QLabel("四步看懂 Quill")
+        title = QLabel("四步看懂 ArcQuill")
         title.setObjectName("welcomeTitle")
         v.addWidget(title)
         v.addSpacing(22)

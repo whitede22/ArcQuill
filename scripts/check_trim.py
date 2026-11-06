@@ -5,23 +5,23 @@
 （因为自检不进入渲染路径）。因此每次调整裁剪规则后都必须运行本工具。
 
 用法：
-    .venv/Scripts/python.exe scripts/check_trim.py dist/Quill
-    .venv/Scripts/python.exe scripts/check_trim.py dist/Quill --manifest 路径
+    .venv/Scripts/python.exe scripts/check_trim.py dist/ArcQuill
+    .venv/Scripts/python.exe scripts/check_trim.py dist/ArcQuill --manifest 路径
     .venv/Scripts/python.exe scripts/check_trim.py <未裁剪目录> <裁剪目录>
 
 **为什么需要一份裁剪清单**
-本流程的裁剪规则内联在 Quill.spec 的 `a.binaries` 筛选中，执行于 COLLECT
+本流程的裁剪规则内联在 ArcQuill.spec 的 `a.binaries` 筛选中，执行于 COLLECT
 阶段——磁盘上任何时候都不存在「未裁剪产物」。所以早期那种「对比两个目录求出
 删了什么」的做法在本项目里根本无法使用：无论传哪两个目录，算出的差异集都是空，
 工具永远输出「两者没有差异，无需校验」。**一个不可能失败的校验，比没有校验更糟**，
 因为它会让人以为这一步已经做过了。
 
-现在 Quill.spec 会在裁剪的同时把被删库名写进 DISTPATH/trim_manifest.json，
+现在 ArcQuill.spec 会在裁剪的同时把被删库名写进 DISTPATH/trim_manifest.json，
 本工具据此校验。用法从「两个目录」变成了「一个目录 + 它自己的清单」。
 
 **清单刻意只记录被删的名字，不记录任何数量。**
 「保留了多少个」在两个地方各有各的口径：spec 只看得见 `a.binaries`，而产物里还有
-COLLECT 另加的 `Quill.exe`，且不同目录下存在同名文件。初版就是因为拿这两个数
+COLLECT 另加的 `ArcQuill.exe`，且不同目录下存在同名文件。初版就是因为拿这两个数
 直接比大小而误报。现在使用的判据是**定义无关**的：
 
   记录为「已删除」的名字，不得出现在产物中。
@@ -102,7 +102,7 @@ def load_manifest(path: Path) -> dict:
     if not path.is_file():
         raise FileNotFoundError(
             f"找不到裁剪清单：{path}\n"
-            "清单由 Quill.spec 在打包时写出。若你是手工运行 pyinstaller，"
+            "清单由 ArcQuill.spec 在打包时写出。若你是手工运行 pyinstaller，"
             "请改用「两个目录」模式并自行准备未裁剪产物作基线。"
         )
     return json.loads(path.read_text(encoding="utf-8"))

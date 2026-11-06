@@ -347,6 +347,9 @@ QSplitter::handle { background: transparent; }
    两个对话框仍然在构造时 `setStyleSheet(stylesheet(tid))`——**样式自持**这条性质
    照旧（不依赖 QApplication 的全局样式表），测试直接构造它们时拿得到正确配色。 */
 QDialog#onboarding { background: $surface; }
+/* 顶栏字标。透明底是必须的：它有自己的一层 alpha，再垫一块底色就会在深色主题
+   下看到一圈浅色方块。也不挂进背景图的半透明规则——它不承载正文。 */
+QLabel#brand { background: transparent; border: none; }
 QLabel#welcomeTitle { font-size: 26px; font-weight: 700; color: $text; }
 QLabel#welcomeSub   { font-size: 14px; color: $text2; }
 QLabel#featureTitle { font-size: 14px; font-weight: 600; color: $text; }
