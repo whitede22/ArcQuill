@@ -11,8 +11,12 @@
 
 from __future__ import annotations
 
-APP_VERSION = "1.3.5"
+APP_VERSION = "1.4.0"
 
 # 仓库地址。报告提交、README 链接、Issue 模板都从这里取，避免同一串地址
 # 在代码里出现多份——换仓库时只改一处。
+#
+# **仓库名仍是 Quill，没有跟着软件改名。** 改仓库会同时废掉已发布的 Release 链接、
+# 已经发给别人的下载地址和 README 里的历史引用，而这一版只是界面换了名字。
+# 将来若真要改仓库，改这里一处即可，GitHub 会自动重定向旧地址。
 REPO_URL = "https://github.com/whitede22/Quill"
