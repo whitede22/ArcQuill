@@ -3,12 +3,20 @@
 from __future__ import annotations
 
 import sqlite3
+import sys
 import time
 from datetime import datetime
 from pathlib import Path
 
 from PySide6.QtCore import QEventLoop, QSettings, QSize, Qt, QTimer, QUrl
-from PySide6.QtGui import QDesktopServices, QIcon, QKeySequence, QPainter, QShortcut
+from PySide6.QtGui import (
+    QDesktopServices,
+    QIcon,
+    QKeySequence,
+    QPainter,
+    QPixmap,
+    QShortcut,
+)
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
@@ -33,6 +41,7 @@ from PySide6.QtWidgets import (
 
 from ..config import (
     APP_DIR,
+    APP_NAME,
     KEY_PATH,
     RECENT_BACKGROUNDS_MAX,
     ensure_dir,
@@ -74,11 +83,35 @@ from .hotkey import available as hotkey_available
 from .refresh_dialog import RefreshDialog
 from .review_dialog import ReviewDialog
 from .settings import SettingsDialog
-from .theme import BG_VEIL_DEFAULT, stylesheet, theme_id_of, veil_level
+from .theme import BG_VEIL_DEFAULT, palette, stylesheet, theme_id_of, veil_level
 from .widgets import EntryCard, EntryDetail
 from .workers import submit
 
 _USER_ROLE = Qt.ItemDataRole.UserRole
+
+# 标题栏左上角字标的高度（逻辑像素）。素材按 48 像素高输出，显示时减半，正好
+# 落在 2 倍缩放的屏幕上；1 倍屏由 Qt 平滑下采，笔画略柔但不至于糊成一团。
+_BRAND_HEIGHT = 24
+
+
+def _brand_pixmap(theme_id: str) -> QPixmap | None:
+    """按主题深浅取横版字标；素材缺失时返回 `None`。
+
+    两套素材各管一半：深色图形配浅色主题，白色图形配深色主题。只留一套的话，
+    字标会在另一半主题下变成一块看不见的东西，而那个位置空着时，用户只会以为
+    界面少画了什么，不会想到是配色问题。
+    """
+    base = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parents[2]))
+    name = (
+        "arcquill_wordmark_dark.png"
+        if palette(theme_id).get("dark")
+        else "arcquill_wordmark_light.png"
+    )
+    pixmap = QPixmap(str(base / "assets" / name))
+    if pixmap.isNull() or pixmap.height() <= 0:
+        return None
+    pixmap.setDevicePixelRatio(pixmap.height() / _BRAND_HEIGHT)
+    return pixmap
 
 # 左栏在看哪个集合。**只在这一处定义**：列表、搜索、排序、删除、撤销、导出
 # 全都按它分派。各处各写一次字符串判断的话，漏掉的那一处会安静地按另一个
@@ -104,13 +137,13 @@ _WORD_FILTER = "生词表 (" + " ".join(f"*{s}" for s in _WORD_SUFFIXES) + ");;�
 # **键必须与 `importer.parse_text()` 实际返回的 `source_format` 逐字相同。**
 # 写错一个字，用户看到的就永远是兜底那句「按普通生词表读的」，而他真正走的
 # 路径没人说得出来——**谎报比不报更糟**。这不是假想的风险：这两个键曾经写成
-# 「Quill 导出（纯文本）」与「Quill 导出（Markdown）」，而解析器返回的是
-# 「Quill 文本导出」与「Quill Markdown 导出」，于是**本程序自己导出的文件
+# 「ArcQuill 导出（纯文本）」与「ArcQuill 导出（Markdown）」，而解析器返回的是
+# 「ArcQuill 文本导出」与「ArcQuill Markdown 导出」，于是**本程序自己导出的文件
 # 也被说成普通生词表**，一直没被发现。现在自检里有一条断言盯着它们不许分家。
 _FORMAT_HOW = {
-    "Quill 文本导出": "按导出格式读的，只取「N. 单词」那一行，并还原备注",
-    "Quill Markdown 导出": "按导出格式读的，只取「## 单词」那一行，并还原备注",
-    "Quill JSON 导出": "按 JSON 结构读的，取每个词条的 lemma、备注与释义",
+    "ArcQuill 文本导出": "按导出格式读的，只取「N. 单词」那一行，并还原备注",
+    "ArcQuill Markdown 导出": "按导出格式读的，只取「## 单词」那一行，并还原备注",
+    "ArcQuill JSON 导出": "按 JSON 结构读的，取每个词条的 lemma、备注与释义",
     "有道单词本（XML）": "按 XML 结构读的，取每个 <word> 的单词与 <trans> 释义",
 }
 _FORMAT_HOW_DEFAULT = "按普通生词表读的：每行取英文词，用逗号列开的会整行收下"
@@ -308,7 +341,7 @@ class MainWindow(QMainWindow):
 
     def _start(self) -> None:
         """窗口外观、界面装配与启动序列。顺序有依赖，见各步注释。"""
-        self.setWindowTitle("Quill · 英语生词本")
+        self.setWindowTitle("ArcQuill · 英语生词本")
         self.resize(1080, 700)
         self.setMinimumSize(760, 520)
         # 收下拖进窗口的 txt 生词表——「把文件拖进来」是比翻文件对话框
@@ -340,7 +373,7 @@ class MainWindow(QMainWindow):
 
         **这里每一道前置检查都是「不满足就干脆不建」，不是「建了再说」。**
         托盘不存在时把窗口藏起来，用户会以为程序已经退出，而进程还占着数据库
-        锁——下一次双击 exe 得到的是「Quill 已在运行」，且没有任何窗口能操作。
+        锁——下一次双击 exe 得到的是「ArcQuill 已在运行」，且没有任何窗口能操作。
         所以宁可没有托盘（关闭窗口就真的退出），也不要一个有托盘的半成品。
         """
         if not bool(self.config.get("tray_enabled", True)):
@@ -354,7 +387,7 @@ class MainWindow(QMainWindow):
             return
 
         tray = QSystemTrayIcon(app.windowIcon(), self)
-        tray.setToolTip(f"Quill · 英语生词本（{HOTKEY_TEXT} 唤出）")
+        tray.setToolTip(f"ArcQuill · 英语生词本（{HOTKEY_TEXT} 唤出）")
 
         menu = self._build_tray_menu()
         tray.setContextMenu(menu)
@@ -440,7 +473,7 @@ class MainWindow(QMainWindow):
             return
         self._tray_hinted = True
         self._tray.showMessage(
-            "Quill 还在后台运行",
+            "ArcQuill 还在后台运行",
             f"按 {HOTKEY_TEXT} 随时唤出；不想要托盘的话，在设置里关掉「托盘常驻」。",
             QSystemTrayIcon.MessageIcon.Information,
             6000,
@@ -601,12 +634,25 @@ class MainWindow(QMainWindow):
         app = QApplication.instance()
         if app is not None:
             app.setStyleSheet(stylesheet(resolved))
+        # 字标是按主题深浅选素材的，不跟着换就会在深色主题下留一块浅色图形。
+        self._refresh_brand()
         # setStyleSheet 会让 Qt 重算样式，但「重算样式」与「重画像素」是两件事；
         # 背景图是 paintEvent 画的，显式刷一次更稳。顺手把子控件缓存也过一遍，
         # 与换背景图走同一条路。
         self._repolish_all()
         self.update()
         return resolved
+
+    def _refresh_brand(self) -> None:
+        """按当前主题重取字标。素材缺失时退回文字，不留一块空白。"""
+        if not hasattr(self, "brand"):
+            return  # 主题可能在顶栏装好之前就被应用一次
+        pixmap = _brand_pixmap(theme_id_of(getattr(self, "_theme", "")))
+        if pixmap is None:
+            self.brand.setPixmap(QPixmap())
+            self.brand.setText(APP_NAME)
+            return
+        self.brand.setPixmap(pixmap)
 
     # ---------- 背景图：拖进来直接用 ----------
 
@@ -678,7 +724,7 @@ class MainWindow(QMainWindow):
     def _settings() -> QSettings:
         """界面状态单独存一个 ini，与 config.json 分离。
 
-        路径挂在 APP_DIR 下而非系统注册表，这样更换 QUILL_HOME 或整个拷贝
+        路径挂在 APP_DIR 下而非系统注册表，这样更换 ARCQUILL_HOME 或整个拷贝
         数据目录时，窗口尺寸与排序习惯会跟着一起走。
         """
         return QSettings(str(APP_DIR / "ui.ini"), QSettings.Format.IniFormat)
@@ -724,7 +770,18 @@ class MainWindow(QMainWindow):
         self._build_status_bar()
 
     def _build_top_bar(self, root: QVBoxLayout) -> None:
-        """顶部一行：输入框、主操作、常规与次要三档按钮。"""
+        """顶部一行：字标、输入框、主操作、常规与次要三档按钮。"""
+        # 字标放在最左，是这块区域里唯一不随窗口宽度变化的东西：用户扫一眼就知道
+        # 自己在哪个程序里，而后面的输入框与按钮该伸缩就伸缩。
+        self.brand = QLabel()
+        self.brand.setObjectName("brand")
+        self.brand.setFixedHeight(_BRAND_HEIGHT)
+        self.brand.setAlignment(
+            Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft
+        )
+        self.brand.setToolTip(f"{APP_NAME} · 英语生词本")
+        self._refresh_brand()
+
         self.input = QLineEdit()
         self.input.setPlaceholderText("输入英语单词，回车查询并收藏")
         self.input.setMinimumHeight(33)
@@ -757,6 +814,8 @@ class MainWindow(QMainWindow):
 
         top = QHBoxLayout()
         top.setSpacing(8)
+        top.addWidget(self.brand)
+        top.addSpacing(6)
         top.addWidget(self.input, 1)
         top.addWidget(self.btn_query)
         top.addSpacing(18)
@@ -2366,7 +2425,7 @@ class MainWindow(QMainWindow):
                 "　· 生词表 —— 每行取第一个英文词，自动忽略行首编号、音标、"
                 "括号和中文释义\n"
                 "　· 词组 —— 整行是 2–4 个纯英文词时按词组收录，进词组收藏\n"
-                "　· Quill 导出的纯文本 / Markdown / JSON —— 按导出格式读\n"
+                "　· ArcQuill 导出的纯文本 / Markdown / JSON —— 按导出格式读\n"
                 "　· 有道单词本导出的 XML —— 按 <word> 与 <trans> 读\n\n"
                 "如果这是本程序导出的纯文本文件，请确认词条行首的编号还在"
                 "（少了编号就没法把它和释义行区分开）。",
@@ -2914,7 +2973,7 @@ class MainWindow(QMainWindow):
 
     def _do_backup(self) -> None:
         self._flush_edits()  # 备注可能还压在内存里，先落库再备份，否则会漏
-        suggested = str(APP_DIR / f"quill_backup_{datetime.now():%Y%m%d_%H%M}.db")
+        suggested = str(APP_DIR / f"arcquill_backup_{datetime.now():%Y%m%d_%H%M}.db")
         path, _ = QFileDialog.getSaveFileName(
             self, "备份数据库", suggested, "SQLite 数据库 (*.db)"
         )
@@ -2934,7 +2993,7 @@ class MainWindow(QMainWindow):
             self,
             "备份完成",
             f"已备份 {total} 条词条到：\n{saved}\n\n"
-            "这是一份完整的数据库文件，需要还原时直接覆盖 quill.db 即可。",
+            "这是一份完整的数据库文件，需要还原时直接覆盖 arcquill.db 即可。",
         )
 
     # ---------- 设置 ----------
@@ -2974,7 +3033,7 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage("恢复功能不可用：没有拿到数据库连接")
             return
         path, _ = QFileDialog.getOpenFileName(
-            self, "选择备份文件", str(APP_DIR), "Quill 备份 (*.db);;所有文件 (*)"
+            self, "选择备份文件", str(APP_DIR), "ArcQuill 备份 (*.db);;所有文件 (*)"
         )
         if not path:
             return

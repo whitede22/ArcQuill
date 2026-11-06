@@ -495,7 +495,7 @@ def inspect_backup(path: Path | str) -> str:
             for item in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
         }
         if "entries" not in tables:
-            return "这个文件里没有词条表，不像是 Quill 的备份"
+            return "这个文件里没有词条表，不像是 ArcQuill 的备份"
     except sqlite3.Error as exc:
         return f"读取失败：{exc}"
     finally:

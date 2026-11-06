@@ -16,7 +16,7 @@ import os
     直接起不来窗口，而 --selfcheck 依然全绿（自检不进入渲染路径，测不出来）。
     例如 qsvgicon.dll 依赖 qt6svg.dll、qpdf.dll 依赖 qt6pdf.dll。
     改动本清单后，请重新打包并运行：
-        .venv/Scripts/python.exe scripts/check_trim.py dist/Quill
+        .venv/Scripts/python.exe scripts/check_trim.py dist/ArcQuill
     校验依据是打包时写出的 dist/trim_manifest.json（见文件末尾说明）。
 
 二、以下几项经实测不可移除：
@@ -151,12 +151,16 @@ a = Analysis(
     pathex=[],
     binaries=[],
     # 图标既是 exe 的资源（EXE 的 icon 参数），也是窗口图标（main.icon_path 在
-    # 打包后按 assets/quill.ico 查找）。漏掉 datas 的话 exe 有图标、窗口没有。
+    # 打包后按 assets/arcquill.ico 查找）。漏掉 datas 的话 exe 有图标、窗口没有。
     #
     # 离线词库同理，而且更隐蔽：漏掉它程序不会报错，只会表现成
     # 「离线模式查什么都说未收录」——看起来像词库太小，实际是文件没被打进去。
     datas=[
-        ("assets/quill.ico", "assets"),
+        ("assets/arcquill.ico", "assets"),
+        # 顶栏字标的深浅两版。漏掉它们不会报错：界面上那个位置会退回成一行
+        # 纯文字，看起来像「设计本来就这样」，而不是缺文件。
+        ("assets/arcquill_wordmark_light.png", "assets"),
+        ("assets/arcquill_wordmark_dark.png", "assets"),
         ("assets/offline_dict.db", "assets"),
     ],
     hiddenimports=[],
@@ -184,11 +188,11 @@ a.binaries = [
 # 只能输出「两者没有差异，无需校验」的原因，一个永远通过的校验等于没有校验。
 #
 # 清单**只记被删库名**，刻意不记「保留了多少个」：本处能看到的是 a.binaries，
-# 而产物里还有 COLLECT 另加的 Quill.exe，且不同目录下存在同名文件——任何
+# 而产物里还有 COLLECT 另加的 ArcQuill.exe，且不同目录下存在同名文件——任何
 # 「数量相等」的判据都要在两处各写一遍定义，必然对不齐（初版就是这样误报的）。
 # 改用的判据是定义无关的：**记录为已删除的名字，不得出现在产物中**。
 #
-# 落在 DISTPATH 而非 DISTPATH/Quill：后者才是可拷贝分发的单元，不混入构建产物。
+# 落在 DISTPATH 而非 DISTPATH/ArcQuill：后者才是可拷贝分发的单元，不混入构建产物。
 try:
     _kept = {item[0] for item in a.binaries}
     _removed = sorted(
@@ -206,7 +210,7 @@ try:
         json.dump({"removed": _removed}, _fh, ensure_ascii=False, indent=2)
 except Exception as _exc:  # noqa: BLE001
     # 记录失败不该让打包失败，但必须喊出来——静默缺清单会让校验退化成走过场
-    print(f"[Quill.spec] 警告：裁剪清单写入失败，check_trim 将无依据可校：{_exc}")
+    print(f"[ArcQuill.spec] 警告：裁剪清单写入失败，check_trim 将无依据可校：{_exc}")
 
 
 pyz = PYZ(a.pure)
@@ -216,7 +220,7 @@ exe = EXE(
     a.scripts,
     [],
     exclude_binaries=True,
-    name="Quill",
+    name="ArcQuill",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -227,7 +231,7 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon="assets/quill.ico",
+    icon="assets/arcquill.ico",
 )
 
 coll = COLLECT(
@@ -237,5 +241,5 @@ coll = COLLECT(
     strip=False,
     upx=False,
     upx_exclude=[],
-    name="Quill",
+    name="ArcQuill",
 )

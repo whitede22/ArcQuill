@@ -3,8 +3,8 @@
 用法：
     .venv/Scripts/python.exe build.py
 
-产物：dist/Quill/ —— 整个目录可直接拷贝分发，双击 Quill.exe 运行。
-体积裁剪规则集中在 Quill.spec 中维护。
+产物：dist/ArcQuill/ —— 整个目录可直接拷贝分发，双击 ArcQuill.exe 运行。
+体积裁剪规则集中在 ArcQuill.spec 中维护。
 
 关于旧产物清理：本脚本不使用递归删除。运行环境对批量删除设有保护阈值，
 而 PyInstaller 需要清空的文件数远超该阈值，直接删除会被拦截导致构建失败。
@@ -22,8 +22,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 DIST = ROOT / "dist"
 BUILD = ROOT / "build"
-SPEC = ROOT / "Quill.spec"
-NAME = "Quill"
+SPEC = ROOT / "ArcQuill.spec"
+NAME = "ArcQuill"
 
 
 def directory_size(path: Path) -> float:
@@ -90,14 +90,12 @@ def ensure_assets() -> None:
     在 datas 阶段报一句 `Unable to find` 然后继续，最后产出一个「查什么都
     说未收录」的包——与其让人从界面症状往回猜，不如在这里停下。
     """
-    if not (ROOT / "assets" / "quill.ico").exists():
-        print("未找到 assets/quill.ico，正在生成…")
-        result = subprocess.run(
-            [sys.executable, str(ROOT / "scripts" / "make_icon.py")], cwd=ROOT
-        )
-        if result.returncode != 0:
-            print("图标生成失败，请手动运行 scripts/make_icon.py")
-            raise SystemExit(1)
+    if not (ROOT / "assets" / "arcquill.ico").exists():
+        # 图标来自设计稿，不在这里凭空生成：换 logo 要重跑资产生成脚本并给出
+        # 原始 png 的路径，打包环节猜不出那张图在哪。
+        print("未找到 assets/arcquill.ico，无法打包。")
+        print(f"先运行：{sys.executable} scripts/make_brand_assets.py --icon <png> --wordmark <目录>")
+        raise SystemExit(1)
 
     dict_name = offline_db_name()
     if not (ROOT / "assets" / dict_name).exists():
@@ -147,7 +145,7 @@ def main() -> int:
     print(f"可执行文件：{exe}")
     print("\n请务必执行下一步，确认裁剪后未缺件：")
     print(f'  "{exe}" --selfcheck')
-    # 裁剪校验必须真的能跑：清单由 Quill.spec 在打包时写出，因此这里只需要
+    # 裁剪校验必须真的能跑：清单由 ArcQuill.spec 在打包时写出，因此这里只需要
     # 一个目录参数。若清单缺失，check_trim 会明确报错而不是输出「通过」。
     print("\n并校验裁剪依赖（清单已由本次打包写出）：")
     print(f'  "{sys.executable}" scripts/check_trim.py "{target}"')

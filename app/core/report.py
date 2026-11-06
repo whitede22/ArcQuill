@@ -59,7 +59,7 @@ _INCLUDES = (
     "出错时的类别（超时、网络、鉴权、限流等）与操作名",
     "生词本规模所在区间、每次启动的耗时",
     "每次启动随机生成的会话号，只用于把同一次打开里的操作归在一起",
-    "Quill 版本与统计数据结构版本",
+    "ArcQuill 版本与统计数据结构版本",
 )
 _EXCLUDES = (
     "具体生词与释义",
@@ -83,6 +83,11 @@ def build_report(days: int = 30, *, now: datetime | None = None) -> dict:
     stamp = (now or datetime.now()).strftime("%Y-%m-%d %H:%M")
     return {
         "report_schema_version": REPORT_SCHEMA_VERSION,
+        "arcquill_version": APP_VERSION,
+        # 旧键保留一份。云上那个中转函数还跑着改名前的版本，它只认
+        # `quill_version`；改它要走一次部署，而客户端更新是用户点一下的事。
+        # 中间这段窗口期里，少了这一行，邮件主题的版本号会是空的。等服务端换成
+        # 新版本并确认没有旧客户端在用，这一行可以删。
         "quill_version": APP_VERSION,
         # 报代码里的表结构版本，不读配置里那个同名字段：那个字段只在默认值里
         # 出现过一次，升级后也不会跟着变，读它等于让每份新报告都写着一个旧数字。
@@ -103,7 +108,7 @@ def build_report(days: int = 30, *, now: datetime | None = None) -> dict:
 
 
 def default_name(now: datetime | None = None) -> str:
-    return f"quill_usage_report_{(now or datetime.now()).strftime('%Y-%m-%d')}.json"
+    return f"arcquill_usage_report_{(now or datetime.now()).strftime('%Y-%m-%d')}.json"
 
 
 def default_dir() -> Path:
@@ -149,6 +154,16 @@ def attach_context(payload: dict, submitter: str, note: str = "") -> dict:
     return payload
 
 
+def _version_of(payload: dict) -> str:
+    """取报告里的程序版本号。
+
+    旧报告文件里这个键叫 `quill_version`，改名后本机还躺着一批。读的时候两个
+    都认，否则预览里版本那一栏会变成空白，看起来像报告坏了。
+    """
+    value = payload.get("arcquill_version") or payload.get("quill_version") or ""
+    return str(value)
+
+
 def summary_lines(payload: dict) -> list[str]:
     """把报告的要点压成几行字，给预览与摘要共用。
 
@@ -162,7 +177,7 @@ def summary_lines(payload: dict) -> list[str]:
         lines.append(f"备注：{payload['note']}")
     lines.extend(
         [
-            f"Quill 版本：{payload.get('quill_version', '')}",
+            f"ArcQuill 版本：{_version_of(payload)}",
             f"报告生成时间：{payload.get('generated_at', '')}",
             f"统计周期：最近 {payload.get('period_days', 0)} 天",
             f"事件总数：{total}",
@@ -234,7 +249,7 @@ def issue_url(payload: dict) -> str:
 
     中转函数不可用时的备用通道，只放汇总数字，明细作为附件上传。
     """
-    title = f"[使用报告] v{payload.get('quill_version', '')} {payload.get('generated_at', '')}"
+    title = f"[使用报告] v{_version_of(payload)} {payload.get('generated_at', '')}"
     body_lines = [
         "本地使用报告已生成，请把 JSON 文件拖到下面的输入框作为附件。",
         "",
@@ -254,12 +269,25 @@ class SubmitError(RuntimeError):
 
 
 def endpoint() -> str:
-    """中转函数地址。环境变量优先，便于自检指向本地桩服务。"""
-    return os.environ.get("QUILL_REPORT_ENDPOINT", DEFAULT_ENDPOINT).strip()
+    """中转函数地址。环境变量优先，便于自检指向本地桩服务。
+
+    **设成空串就是空串，不回落默认值。** 界面据此判断「还没配地址」并改走 GitHub，
+    用 `or` 串联的话空串会被当成没设，于是永远回落到生产地址，那条分支也就永远不会
+    走到。旧变量名 `QUILL_REPORT_*` 仍然认：它可能已经写进某台机器上的启动脚本。
+    """
+    for name in ("ARCQUILL_REPORT_ENDPOINT", "QUILL_REPORT_ENDPOINT"):
+        value = os.environ.get(name)
+        if value is not None:
+            return value.strip()
+    return DEFAULT_ENDPOINT
 
 
 def report_key() -> str:
-    return os.environ.get("QUILL_REPORT_KEY", DEFAULT_KEY).strip()
+    for name in ("ARCQUILL_REPORT_KEY", "QUILL_REPORT_KEY"):
+        value = os.environ.get(name)
+        if value is not None:
+            return value.strip()
+    return DEFAULT_KEY
 
 
 def submit(payload: dict, *, timeout: float = SUBMIT_TIMEOUT) -> None:

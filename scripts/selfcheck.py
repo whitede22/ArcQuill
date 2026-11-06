@@ -319,7 +319,7 @@ def _cleanup_tmpdir(path: Path) -> None:
 
 
 def main() -> int:
-    tmpdir = Path(tempfile.mkdtemp(prefix="quill_check_"))
+    tmpdir = Path(tempfile.mkdtemp(prefix="arcquill_check_"))
     # **用完必须删掉。** 以前这里（以及本文件另外几处 `mkdtemp`）只创建不清理，
     # 每跑一轮就留下十来个各约 5 MB 的目录。单次看不出来，但变异测试会跑几十
     # 遍自检——实测累积到 **3763 个目录 / 约 2.6 GB**，把系统盘写满，然后整个
@@ -411,7 +411,7 @@ def main() -> int:
     # 第 14 节那条「改完备注后旧内容搜不到」（`search("高频") == []`）会被这些
     # 词条的**标签**命中而变成假红——真正的原因（跨小节写脏了同一个库）在
     # 失败信息里一个字都看不出来。这一条是实测踩到的，不是预防性设计。
-    _tag_dir = Path(tempfile.mkdtemp(prefix="quill_tags_"))
+    _tag_dir = Path(tempfile.mkdtemp(prefix="arcquill_tags_"))
     atexit.register(_cleanup_tmpdir, _tag_dir)
     _tag_conn = connect(_tag_dir / "tags.db")
     init_db(_tag_conn)
@@ -507,7 +507,7 @@ def main() -> int:
     #
     # 教训值得写下来：**换掉一条假声明时，新理由同样要取证**，否则只是把
     # 一个谎换成了另一个听起来更顺耳的谎。两次都是断言把它抓出来的。
-    _undo_dir = Path(tempfile.mkdtemp(prefix="quill_undo_"))
+    _undo_dir = Path(tempfile.mkdtemp(prefix="arcquill_undo_"))
     atexit.register(_cleanup_tmpdir, _undo_dir)
     _undo_conn = connect(_undo_dir / "undo.db")
     init_db(_undo_conn)
@@ -595,7 +595,7 @@ def main() -> int:
     )
     from app.providers.prompts import PROMPT_VERSION, SYSTEM_PROMPT  # noqa: PLC0415
 
-    _ph_dir = Path(tempfile.mkdtemp(prefix="quill_phrase_"))
+    _ph_dir = Path(tempfile.mkdtemp(prefix="arcquill_phrase_"))
     atexit.register(_cleanup_tmpdir, _ph_dir)
     _ph_conn = connect(_ph_dir / "phrase.db")
     init_db(_ph_conn)
@@ -993,7 +993,7 @@ def main() -> int:
 
     # 模拟老库升级：v1 库应自动补齐新表并推进版本号。
     # 该路径曾因升级分支缺失而静默失效，必须有独立用例覆盖。
-    legacy_dir = Path(tempfile.mkdtemp(prefix="quill_legacy_"))
+    legacy_dir = Path(tempfile.mkdtemp(prefix="arcquill_legacy_"))
     atexit.register(_cleanup_tmpdir, legacy_dir)
     legacy = connect(legacy_dir / "legacy.db")
     legacy.executescript("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);")
@@ -1015,7 +1015,7 @@ def main() -> int:
     # 模拟 v2 老库：FTS 表是旧的 5 列结构，且已写入数据。
     # 关键点在于「重建后数据仍可检索」——只 DROP 不重建会静默清空索引，
     # 表现为「升级后搜什么都搜不到」，这类问题必须由用例守住。
-    old_dir = Path(tempfile.mkdtemp(prefix="quill_oldfts_"))
+    old_dir = Path(tempfile.mkdtemp(prefix="arcquill_oldfts_"))
     atexit.register(_cleanup_tmpdir, old_dir)
     old = connect(old_dir / "old.db")
     old.executescript(DDL)
@@ -1553,7 +1553,7 @@ def main() -> int:
 
     # ---- 13. 数据库备份 ----
     expected = repo.count()
-    backup_path = tmpdir / "sub" / "quill_backup.db"
+    backup_path = tmpdir / "sub" / "arcquill_backup.db"
     saved = backup_to(conn, backup_path)
     check("备份文件已生成", saved.exists() and saved.stat().st_size > 0)
     check("备份目录自动创建", backup_path.parent.is_dir())
@@ -1757,7 +1757,7 @@ def main() -> int:
 
     # FTS 损坏时必须回退 LIKE，回退路径的字段覆盖不能比 FTS 窄，
     # 否则会出现「索引一坏，检索能力静默退化」这种极难察觉的问题
-    fallback_dir = Path(tempfile.mkdtemp(prefix="quill_like_"))
+    fallback_dir = Path(tempfile.mkdtemp(prefix="arcquill_like_"))
     atexit.register(_cleanup_tmpdir, fallback_dir)
     fconn = connect(fallback_dir / "like.db")
     init_db(fconn)
@@ -2082,7 +2082,7 @@ def main() -> int:
     import app.config as config_module  # noqa: PLC0415
 
     saved_dir, saved_path = config_module.APP_DIR, config_module.CONFIG_PATH
-    cfg_dir = Path(tempfile.mkdtemp(prefix="quill_cfg_"))
+    cfg_dir = Path(tempfile.mkdtemp(prefix="arcquill_cfg_"))
     atexit.register(_cleanup_tmpdir, cfg_dir)
     config_module.APP_DIR = cfg_dir
     config_module.CONFIG_PATH = cfg_dir / "config.json"
@@ -2645,7 +2645,7 @@ def main() -> int:
     # 版本号写进 meta 却没人读，等于没写。v1 的库把换行存成字面量转义，若被静默
     # 接受，用户只会在释义里看到 `\n` 这坨字符，既不知道原因也无从修。这里造一个
     # 只带版本号的假 v1 库，验证守卫确实拒绝、且状态文案点明是版本问题。
-    with tempfile.TemporaryDirectory(prefix="quill_v1_") as _v1_dir:
+    with tempfile.TemporaryDirectory(prefix="arcquill_v1_") as _v1_dir:
         _v1_path = Path(_v1_dir) / "offline_dict.db"
         _vc = sqlite3.connect(_v1_path)
         _vc.execute("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
@@ -2685,7 +2685,7 @@ def main() -> int:
 
     import app.config as _app_config  # noqa: PLC0415
 
-    with tempfile.TemporaryDirectory(prefix="quill_userdict_") as _user_home:
+    with tempfile.TemporaryDirectory(prefix="arcquill_userdict_") as _user_home:
         _saved_app_dir = _app_config.APP_DIR
         _user_db = Path(_user_home) / "offline_dict.db"
         _uc = sqlite3.connect(_user_db)
@@ -2810,7 +2810,7 @@ def main() -> int:
     # 落盘往返：save_config 只认 _COERCERS 里登记过的字段。漏登记的表现是
     # 「在设置里关掉兜底、重启后又自己打开了」——开关形同虚设，且不会报错。
     saved_dir2, saved_path2 = config_module.APP_DIR, config_module.CONFIG_PATH
-    rt_dir = Path(tempfile.mkdtemp(prefix="quill_fb_"))
+    rt_dir = Path(tempfile.mkdtemp(prefix="arcquill_fb_"))
     atexit.register(_cleanup_tmpdir, rt_dir)
     config_module.APP_DIR = rt_dir
     config_module.CONFIG_PATH = rt_dir / "config.json"
@@ -3289,7 +3289,7 @@ def main() -> int:
     # 单词表格式的**唯一用途**就是重新导入，所以它的判据不能是「字符串长得像
     # 不像」，必须走一遍真解析器。上面那两种（纯文本 / Markdown）验的是「导出过
     # 的文件能被读回」；这里多验一件事：**一行废行都不出现**。标题里全是汉字，
-    # 会被判成「没认出单词」；`Generated by Quill` 更糟——三个英文词，会被当成
+    # 会被判成「没认出单词」；`Generated by ArcQuill` 更糟——三个英文词，会被当成
     # 一条词组收进词组收藏。用户看到的是「导入成功」，只是里面混进了不是他的东西。
     _imp_wl = export_wordlist(_imp_sample, "英语生词本")
     _imp_wl_res = parse_text(_imp_wl)
@@ -3560,7 +3560,7 @@ def main() -> int:
         "测试册",
     )
     _json_parsed = parse_text(_json_blob)
-    check("导入：认出 Quill JSON 导出", _json_parsed.source_format == "Quill JSON 导出",
+    check("导入：认出 ArcQuill JSON 导出", _json_parsed.source_format == "ArcQuill JSON 导出",
           _json_parsed.source_format)
     check("导入：JSON 里的单词被完整取出",
           [w.word for w in _json_parsed.words] == ["ubiquitous", "naive"],
@@ -3578,12 +3578,12 @@ def main() -> int:
     _json_alien = json.dumps({"name": "my-config", "version": 2, "lemma": "not-a-word"})
     _alien_parsed = parse_text(_json_alien)
     check("导入：不认识格式的 JSON 不被当成生词本",
-          _alien_parsed.source_format != "Quill JSON 导出",
+          _alien_parsed.source_format != "ArcQuill JSON 导出",
           _alien_parsed.source_format)
     # 坏 JSON 不能让导入炸掉：用户可能选到一个损坏的文件
     _broken_parsed = parse_text('{"format": "quill-entries", "entries": [,,,')
     check("导入：坏 JSON 退化成普通词表而不是抛异常",
-          _broken_parsed.source_format != "Quill JSON 导出",
+          _broken_parsed.source_format != "ArcQuill JSON 导出",
           _broken_parsed.source_format)
 
     # 三种导出必须全部能被导入认出来（文本 / Markdown / JSON）。
@@ -3592,10 +3592,10 @@ def main() -> int:
     _roundtrip_bad = [
         _label
         for _label, _blob, _want in (
-            ("文本", export_text([Entry(lemma="ubiquitous", notes="a")]), "Quill 文本导出"),
+            ("文本", export_text([Entry(lemma="ubiquitous", notes="a")]), "ArcQuill 文本导出"),
             ("Markdown", export_markdown([Entry(lemma="ubiquitous", notes="a")]),
-             "Quill Markdown 导出"),
-            ("JSON", _json_blob, "Quill JSON 导出"),
+             "ArcQuill Markdown 导出"),
+            ("JSON", _json_blob, "ArcQuill JSON 导出"),
         )
         if parse_text(_blob).source_format != _want
     ]
@@ -3604,10 +3604,38 @@ def main() -> int:
     # 导入侧刻意**不 import** 导出侧的格式标识常量（那样将来改了标识就再也读不了
     # 旧文件）。代价是两处各写一份，可能悄悄分家——分家的后果是「自己导出的文件
     # 自己导不回去」，而这只会在用户真的去导的时候才被发现。所以必须有一条断言盯着。
+    #
+    # 判据是「导出侧当前写的那个值必须在导入侧的候选集里」，不是「两边相等」：
+    # 改过名之后导入侧是**一串**值（旧版文件还要认），集合里必然含着历史值。
     check(
-        "导出与导入的 JSON 格式标识一致",
-        exporter_mod.JSON_FORMAT_TAG == importer_mod._JSON_FORMAT_TAG,
-        f"{exporter_mod.JSON_FORMAT_TAG!r} vs {importer_mod._JSON_FORMAT_TAG!r}",
+        "导出与导入的 JSON 格式标识对得上",
+        exporter_mod.JSON_FORMAT_TAG in importer_mod._JSON_FORMAT_TAGS,
+        f"{exporter_mod.JSON_FORMAT_TAG!r} vs {sorted(importer_mod._JSON_FORMAT_TAGS)!r}",
+    )
+
+    # 改名（Quill → ArcQuill）之后，旧文件必须还能读回来。这条**只能验 JSON**：
+    # 纯文本导出就算把署名行删掉，导入侧还有「72 个 = 加 72 个 -」那条兜底，
+    # 拿一份旧文本喂进去永远都会认出来，那样写出来的断言恒为真，比没有更糟。
+    # 所以文本那条只能退到结构性判据上验「旧值还在候选集里」，并在此写明它证不了行为。
+    _legacy_blob = json.dumps(
+        {
+            "format": "quill-entries",
+            "version": 1,
+            "entries": [{"lemma": "legacy", "definition_zh": "旧文件里的词"}],
+        },
+        ensure_ascii=False,
+    )
+    _legacy_parsed = parse_text(_legacy_blob)
+    check(
+        "导入：认得改名前的 JSON 导出（旧标识没被清掉）",
+        _legacy_parsed.source_format == "ArcQuill JSON 导出"
+        and [w.word for w in _legacy_parsed.words] == ["legacy"],
+        f"{_legacy_parsed.source_format} {[w.word for w in _legacy_parsed.words]}",
+    )
+    check(
+        "导入：文本导出的旧署名仍在候选集里（这条只是结构判据，行为由上面的兜底掩盖）",
+        "Generated by Quill" in importer_mod._EXPORT_MARKS,
+        str(importer_mod._EXPORT_MARKS),
     )
 
     # ---- 导入：认出有道单词本（XML） ----
@@ -3796,7 +3824,7 @@ def main() -> int:
     # UI 把 source_format 翻译成「识别依据」，靠的是 `main_window._FORMAT_HOW`。
     # 那张表与解析器的返回值是**两份定义**，必须有一条断言盯着它们不许分家：
     # 分家的后果是用户看到「按普通生词表读的」，而他真正走的路径没人说得出来。
-    # 曾经就因为两个键写成「Quill 导出（纯文本）」而解析器返回「Quill 文本
+    # 曾经就因为两个键写成「ArcQuill 导出（纯文本）」而解析器返回「ArcQuill 文本
     # 导出」，**本程序自己导出的文件被一直说成普通词表**。
     from app.ui.main_window import _FORMAT_HOW
 
@@ -3806,9 +3834,9 @@ def main() -> int:
         parse_text("ubiquitous\n").source_format,
     )
     _fmt_named = (
-        ("Quill 文本导出", export_text([Entry(lemma="ubiquitous")], "册")),
-        ("Quill Markdown 导出", export_markdown([Entry(lemma="ubiquitous")], "册")),
-        ("Quill JSON 导出", export_json([Entry(lemma="ubiquitous")], "册")),
+        ("ArcQuill 文本导出", export_text([Entry(lemma="ubiquitous")], "册")),
+        ("ArcQuill Markdown 导出", export_markdown([Entry(lemma="ubiquitous")], "册")),
+        ("ArcQuill JSON 导出", export_json([Entry(lemma="ubiquitous")], "册")),
         ("有道单词本（XML）", _yd_xml),
     )
     _fmt_holes = [
@@ -4194,7 +4222,7 @@ def main() -> int:
     _json_text = export_json(_fmt_entries, "测试表")
     # 版本号必须存在且是数字：没有它，第一次改结构就变成「旧文件读不了」
     _json_obj = json.loads(_json_text)
-    check("JSON 顶层带格式标识", _json_obj.get("format") == "quill-entries",
+    check("JSON 顶层带格式标识", _json_obj.get("format") == exporter_mod.JSON_FORMAT_TAG,
           str(_json_obj.get("format")))
     check("JSON 顶层带版本号且为整数",
           isinstance(_json_obj.get("version"), int) and _json_obj["version"] >= 1,
@@ -5713,7 +5741,7 @@ def main() -> int:
         from PySide6.QtCore import QCoreApplication
         from PySide6.QtNetwork import QLocalServer
 
-        _probe_name = "Quill.Selfcheck.Activate"
+        _probe_name = "ArcQuill.Selfcheck.Activate"
         # 用 QCoreApplication 而不是 QApplication：这条链路只要事件分发，
         # 不需要窗口系统。建 QApplication 会在无显示环境里要求平台插件，
         # 把一条「通道通不通」的判据变成「这台机器有没有桌面」。
@@ -5832,7 +5860,7 @@ def main() -> int:
         )
         # 按 ast 读出 datas，不做文本包含。文本包含会被注释行骗过去：
         # 把这一行注释掉，字符串还在文件里，判据照样绿——那就成了装饰。
-        _spec_text = (_project_root / "Quill.spec").read_text(encoding="utf-8")
+        _spec_text = (_project_root / "ArcQuill.spec").read_text(encoding="utf-8")
         _spec_datas: list = []
         try:
             import ast as _ast
@@ -5851,7 +5879,7 @@ def main() -> int:
 
         # 配置写入必须原子完成：写到一半坏掉时，读取侧会静默退回默认值，
         # 用户的「已拒绝统计」选择就丢了，下次启动会重新弹告知页。
-        _atomic_dir = Path(tempfile.mkdtemp(prefix="quill_selfcheck_cfg_"))
+        _atomic_dir = Path(tempfile.mkdtemp(prefix="arcquill_selfcheck_cfg_"))
         _saved_app_dir = cfg_mod.APP_DIR
         _saved_cfg_path = cfg_mod.CONFIG_PATH
         _saved_ana_path = cfg_mod.ANALYTICS_PATH
@@ -5944,7 +5972,7 @@ def main() -> int:
         from app.core import errors as err_mod
         from app.core import report as report_mod
 
-        _v2_dir = Path(tempfile.mkdtemp(prefix="quill_selfcheck_ana2_"))
+        _v2_dir = Path(tempfile.mkdtemp(prefix="arcquill_selfcheck_ana2_"))
         _v2_saved = (cfg_mod.APP_DIR, cfg_mod.CONFIG_PATH, cfg_mod.ANALYTICS_PATH)
         try:
             cfg_mod.APP_DIR = _v2_dir
@@ -6175,7 +6203,7 @@ def main() -> int:
             _worst = {
                 "submitter": "名" * report_mod.MAX_SUBMITTER,
                 "note": "字" * report_mod.MAX_NOTE,
-                "quill_version": "1.3.5",
+                "arcquill_version": "1.3.5",
                 "generated_at": "2026-10-29 21:00",
                 "period_days": 30,
                 "event_total": 4000,
@@ -6224,7 +6252,7 @@ def main() -> int:
     try:
         from app.core import report as report_mod  # noqa: PLC0415
 
-        _ctx = {"event_total": 3, "quill_version": "9.9.9", "generated_at": "2026-10-29"}
+        _ctx = {"event_total": 3, "arcquill_version": "9.9.9", "generated_at": "2026-10-29"}
         report_mod.attach_context(_ctx, "  小明  ", "  加个生词本导出吧  ")
         check("署名去掉首尾空白", _ctx.get("submitter") == "小明", str(_ctx.get("submitter")))
         check("备注去掉首尾空白", _ctx.get("note") == "加个生词本导出吧", str(_ctx.get("note")))
@@ -6274,11 +6302,11 @@ def main() -> int:
         _good = {
             "report": {
                 "report_schema_version": 1,
-                "quill_version": "9.9.9",
+                "arcquill_version": "9.9.9",
                 "generated_at": "2026-10-29 17:00",
                 "event_total": 5,
             },
-            "summary": ["Quill 版本：9.9.9", "事件总数：5"],
+            "summary": ["ArcQuill 版本：9.9.9", "事件总数：5"],
         }
 
         def _call(body, *, key="check-key", method="POST", ip="10.1.0.1", raw=""):
@@ -6428,7 +6456,7 @@ def _load_relay():
     import importlib.util
 
     path = ROOT / "server" / "report_relay" / "main.py"
-    spec = importlib.util.spec_from_file_location("quill_report_relay", path)
+    spec = importlib.util.spec_from_file_location("arcquill_report_relay", path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
@@ -6439,11 +6467,11 @@ def _temp_leftovers() -> list[str]:
 
     **前缀表只留一份定义**（`clean_temp.py::PREFIXES`），不在这里另抄一份。
 
-    这里原先自己写了一份，而且**比那一份窄**：少了 `quill_shot_*` /
-    `quill_lock_*` / `quill_ablate_*` / `quill_probe_*` / `quill_gui_*` /
-    `quill_export_*` / `quill_v1_*` / `quill_userdict_*` 八个。后果不是
+    这里原先自己写了一份，而且**比那一份窄**：少了 `arcquill_shot_*` /
+    `arcquill_lock_*` / `arcquill_ablate_*` / `arcquill_probe_*` / `arcquill_gui_*` /
+    `arcquill_export_*` / `arcquill_v1_*` / `arcquill_userdict_*` 八个。后果不是
     「少报几条」，是**整整一类泄漏不在视野里**：实测临时目录里躺着一个 10 月 11 日的
-    `quill_selfcheck_*`（装着 `backup_src.db` 等文件），其后跑了几十轮自检，
+    `arcquill_selfcheck_*`（装着 `backup_src.db` 等文件），其后跑了几十轮自检，
     **没有任何一条断言提到过它**。「判据覆盖的目标恰好是被漏掉的那一类」，
     正是本项目反复踩到的形态——所以这里改成从 `clean_temp` 取，别处也只许有那一份。
     """
@@ -6514,19 +6542,19 @@ def _selftest_leftover_prefixes() -> int:
 
     两件事分开验，因为它们是两种不同的失效：
 
-    ① **表是共用的**：建一个 `quill_shot_` 前缀的临时目录——旧的那份窄表认不出
+    ① **表是共用的**：建一个 `arcquill_shot_` 前缀的临时目录——旧的那份窄表认不出
        它——再看 `_temp_leftovers()` 报不报。不报，就说明这个检查又退回了「只认
        自己在用的那几个前缀」的状态，而它当初正是因此漏掉了一整类泄漏。
     ② **表没有漏项**：把全仓 `mkdtemp(prefix=...)` 扫出来逐个问表认不认。
        ① **根本验不出这一条**：一张共用的、人人都读的**窄表**照样能通过 ①。
-       实测就漏过三个（`quill_tags_` / `quill_undo_` / `quill_phrase_`）：
+       实测就漏过三个（`arcquill_tags_` / `arcquill_undo_` / `arcquill_phrase_`）：
        对应的三个小节各自建了临时库，而前缀表里一行都没写，全套检查跑了几十轮
        **没有任何一条断言提到它们**——「判据覆盖的目标恰好是被漏掉的那一类」。
 
     一个不会失败的检查等于没有检查：② 用一个**故意认不出任何东西的表**再跑一遍，
     必须报出漏项，否则这条检查自己就是空的。
     """
-    probe = Path(tempfile.mkdtemp(prefix="quill_shot_"))
+    probe = Path(tempfile.mkdtemp(prefix="arcquill_shot_"))
     (probe / "sentinel").write_text("x", encoding="utf-8")
     try:
         seen = str(probe) in _temp_leftovers()
@@ -6537,7 +6565,7 @@ def _selftest_leftover_prefixes() -> int:
             f"  FAIL  残留检查认不出 {probe.name} —— 前缀表多半又被抄成窄的一份了"
         )
         return 1
-    print("  PASS  残留检查的前缀表取自 clean_temp（认得出 quill_shot_*）")
+    print("  PASS  残留检查的前缀表取自 clean_temp（认得出 arcquill_shot_*）")
 
     missing = _uncovered_prefixes()
     if missing:
@@ -6555,7 +6583,7 @@ def _selftest_leftover_prefixes() -> int:
 
 
 def _verify_no_temp_leftovers() -> int:
-    """确认本次运行没有在系统临时目录里留下 `quill_*` 目录。
+    """确认本次运行没有在系统临时目录里留下 `arcquill_*` 目录。
 
     这条检查放不进 `main()`：临时目录是 `atexit` 里删的，那一刻自检已经跑完、
     汇总行都打过了。**但它必须被检查**——这个泄漏曾静默累积到 3763 个目录 /

@@ -530,7 +530,7 @@ MUTATIONS: list[tuple[str, str, str, str, str, str]] = [
     (
         "importer.py 不再识别本程序导出的文件（释义行会被挖成假词条）",
         "app/core/importer.py",
-        "    if _EXPORT_MARK in text:\n"
+        "    if any(mark in text for mark in _EXPORT_MARKS):\n"
         "        return True\n"
         "    # 用户可能把文件尾的署名行裁掉，所以不能只认那一句。两条线同时出现\n"
         "    # 才算——普通词表不会恰好有 72 个 `=` 又有 72 个 `-`。\n"
@@ -793,8 +793,8 @@ MUTATIONS: list[tuple[str, str, str, str, str, str]] = [
     (
         "main_window.py 识别依据的键写错（本程序导出被说成普通词表）",
         "app/ui/main_window.py",
-        '    "Quill 文本导出": "按导出格式读的，只取「N. 单词」那一行，并还原备注",\n',
-        '    "Quill 导出（纯文本）": "按导出格式读的，只取「N. 单词」那一行，并还原备注",\n',
+        '    "ArcQuill 文本导出": "按导出格式读的，只取「N. 单词」那一行，并还原备注",\n',
+        '    "ArcQuill 导出（纯文本）": "按导出格式读的，只取「N. 单词」那一行，并还原备注",\n',
         "scripts/selfcheck.py",
         "每种带结构的格式都能被「识别依据」表覆盖",
     ),
@@ -1831,7 +1831,7 @@ MUTATIONS: list[tuple[str, str, str, str, str, str]] = [
         "db.inspect_backup 不查 entries 表",
         "app/core/db.py",
         '        if "entries" not in tables:\n'
-        '            return "这个文件里没有词条表，不像是 Quill 的备份"\n',
+        '            return "这个文件里没有词条表，不像是 ArcQuill 的备份"\n',
         '        if "entries" not in tables:\n            pass\n',
         "scripts/selfcheck.py",
         "完整性 ok 但没有词条表被拒绝",

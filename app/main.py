@@ -35,7 +35,7 @@ from .security.keystore import load_api_key
 from .ui.main_window import MainWindow
 from .ui.theme import stylesheet
 
-LOCK_PATH = APP_DIR / "quill.lock"
+LOCK_PATH = APP_DIR / "arcquill.lock"
 
 # 启动计时的起点。取在本模块 import 时，也就是进程刚起来、窗口还没建的那一
 # 刻——**不含**解释器与 PyInstaller 引导的那段。这段前缀在启动总耗时里不算小，
@@ -44,7 +44,7 @@ _STARTED = time.monotonic()
 
 # 「把已经开着的那个窗口叫出来」的本地通道名。改名字等于改变协议，
 # 版本号后缀让新旧两版同时存在时不会互相误解。
-ACTIVATION_SERVER = "Quill.Activate.v1"
+ACTIVATION_SERVER = "ArcQuill.Activate.v1"
 
 
 def notify_running_instance(name: str | None = None) -> bool:
@@ -78,7 +78,7 @@ def start_activation_server(on_activate, parent=None, name: str | None = None):
     表现是第二个实例又弹「已在运行」。挂到窗口上，窗口活着它就活着。
 
     `name` 只为测试留出另一个端点：自检要跑真实的监听与敲击，用生产名字会
-    和正在运行的 Quill 抢同一个端点。
+    和正在运行的 ArcQuill 抢同一个端点。
     """
     from PySide6.QtNetwork import QLocalServer
 
@@ -107,7 +107,7 @@ def icon_path() -> Path | None:
         base = Path(getattr(sys, "_MEIPASS", Path(sys.executable).parent))
     else:
         base = Path(__file__).resolve().parents[1]
-    candidate = base / "assets" / "quill.ico"
+    candidate = base / "assets" / "arcquill.ico"
     return candidate if candidate.exists() else None
 
 
@@ -201,7 +201,7 @@ def main() -> int:
     if lock is None:
         QMessageBox.information(
             None,
-            "Quill 已在运行",
+            "ArcQuill 已在运行",
             "生词本已经打开了一个窗口。\n\n"
             "同时运行多个实例会让数据库写入相互争用，因此只允许开启一个。\n"
             "如果找不到窗口，看一下任务栏右下角的托盘图标。",
@@ -224,7 +224,7 @@ def main() -> int:
         替换。少了第一步，用户在恢复之后会觉得「还是原来那份好」而回不去。
         """
         guard = backup_to(
-            conn, APP_DIR / f"quill_before_restore_{datetime.now():%Y%m%d-%H%M%S}.db"
+            conn, APP_DIR / f"arcquill_before_restore_{datetime.now():%Y%m%d-%H%M%S}.db"
         )
         staged = stage_restore(backup, DB_PATH)
         conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
