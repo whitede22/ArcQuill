@@ -215,9 +215,9 @@ row.addWidget(remove)      # 删除仍在最右，破坏性操作离手最近的
 背景图系列），而不再是一张张补：
 
 ```bash
-QUILL_SHOT_KIND=fallback .venv/Scripts/python.exe scripts/screenshot.py preview_fallback.png
+ARCQUILL_SHOT_KIND=fallback .venv/Scripts/python.exe scripts/screenshot.py preview_fallback.png
 # 其余：不带 KIND 出主图；incomplete / settings / import 各出一张；
-# background 出「开模糊」，background + QUILL_SHOT_BLUR=0 出「不模糊」
+# background 出「开模糊」，background + ARCQUILL_SHOT_BLUR=0 出「不模糊」
 ```
 
 > 教训：**默认值变更没有跟着同步到产物**。只重生成「发现问题的那一张」是不够的——
