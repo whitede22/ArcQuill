@@ -28,7 +28,7 @@ from app.providers.offline import OFFLINE_DB_NAME  # noqa: E402
 # 词库放在独立 tag 的 Release 里，与版本号解耦：换词库不必发版，
 # 发版也不必重传这 64.8 MB。
 DICT_TAG = "dict-v2"
-DICT_URL = f"https://github.com/whitede22/Quill/releases/download/{DICT_TAG}/{OFFLINE_DB_NAME}"
+DICT_URL = f"https://github.com/whitede22/ArcQuill/releases/download/{DICT_TAG}/{OFFLINE_DB_NAME}"
 
 # 全量档（769,435 词）的指纹。换成新词库时同步改这里和 DICT_TAG。
 DICT_SHA256 = "f58112a18cdce77a86ea00e2d50acee8da4ae8b767e5a65d72e3d2708d1fe4f2"
@@ -66,7 +66,7 @@ def open_url(request: urllib.request.Request, use_proxy: bool):
 def download_once(target: Path, use_proxy: bool = True) -> None:
     """下载一次到 target。失败直接抛出，由调用方决定是否重试。"""
     request = urllib.request.Request(
-        DICT_URL, headers={"User-Agent": "quill-fetch-dict"}
+        DICT_URL, headers={"User-Agent": "arcquill-fetch-dict"}
     )
     with open_url(request, use_proxy) as response:
         total = int(response.headers.get("Content-Length") or 0)
