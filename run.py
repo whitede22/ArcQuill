@@ -50,10 +50,10 @@ def _cleanup_home(path: Path) -> None:
 
 def run_selfcheck() -> int:
     # 使用临时数据目录，避免自检污染用户生词本
-    home = Path(tempfile.mkdtemp(prefix="quill_selfcheck_"))
-    os.environ["QUILL_HOME"] = str(home)
+    home = Path(tempfile.mkdtemp(prefix="arcquill_selfcheck_"))
+    os.environ["ARCQUILL_HOME"] = str(home)
     # **建了就要登记清理。** 这个目录里装着 6 个 SQLite 文件（约 1.5 MB），而这段
-    # 代码在**打包产物**里——用户每跑一次 `Quill.exe --selfcheck` 就多留一个。
+    # 代码在**打包产物**里——用户每跑一次 `ArcQuill.exe --selfcheck` 就多留一个。
     # 它不报错、不影响任何断言，只是让系统盘悄悄涨；本项目踩过同款（6 处
     # `mkdtemp` 不清理 → 3763 个目录 / 2.6 GB，最后以 `ENOSPC` 的形式爆发，
     # 表现得像「工具坏了」，而不是「有个目录没删」）。
@@ -182,7 +182,7 @@ def run_selfcheck() -> int:
     except Exception as exc:  # noqa: BLE001
         note("主窗口构建", False, str(exc))
 
-    # 8. 图标资源：验证 Quill.spec 的 datas 是否带上，且 Qt 能解析 ICO。
+    # 8. 图标资源：验证 ArcQuill.spec 的 datas 是否带上，且 Qt 能解析 ICO。
     #    ICO 解码依赖 imageformats 插件，裁剪 DLL 时很容易连带删掉。
     try:
         from PySide6.QtGui import QIcon
