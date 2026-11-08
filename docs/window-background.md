@@ -229,14 +229,14 @@ QMainWindow[hasBackground="true"][bgVeil="soft"] QLabel#countLabel { background:
 
 详见 `docs/theming.md` 第五节。
 
-复现判读用的出图命令（`QUILL_SHOT_WALLPAPER` 指向真实照片；自绘样张是无结构的低饱和
+复现判读用的出图命令（`ARCQUILL_SHOT_WALLPAPER` 指向真实照片；自绘样张是无结构的低饱和
 渐变，任何档位都只呈现一层淡色偏，会把人误导成「透明没生效」）：
 
 ```bash
 W="C:/Windows/Web/Wallpaper/Windows/img19.jpg"
-QUILL_SHOT_KIND=background QUILL_SHOT_WALLPAPER="$W"   .venv/Scripts/python.exe scripts/screenshot.py preview_background.png
-QUILL_SHOT_KIND=background QUILL_SHOT_WALLPAPER="$W" QUILL_SHOT_VEIL=soft   .venv/Scripts/python.exe scripts/screenshot.py preview_background_soft.png
-QUILL_SHOT_KIND=background QUILL_SHOT_WALLPAPER="$W" QUILL_SHOT_VEIL=bold   .venv/Scripts/python.exe scripts/screenshot.py preview_background_bold.png
+ARCQUILL_SHOT_KIND=background ARCQUILL_SHOT_WALLPAPER="$W"   .venv/Scripts/python.exe scripts/screenshot.py preview_background.png
+ARCQUILL_SHOT_KIND=background ARCQUILL_SHOT_WALLPAPER="$W" ARCQUILL_SHOT_VEIL=soft   .venv/Scripts/python.exe scripts/screenshot.py preview_background_soft.png
+ARCQUILL_SHOT_KIND=background ARCQUILL_SHOT_WALLPAPER="$W" ARCQUILL_SHOT_VEIL=bold   .venv/Scripts/python.exe scripts/screenshot.py preview_background_bold.png
 ```
 
 ## 五、Qt 的一个坑：祖先属性变了，后代选择器的缓存不会失效
