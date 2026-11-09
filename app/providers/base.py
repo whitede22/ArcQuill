@@ -12,7 +12,16 @@ from ..core.models import Entry, Phrase
 
 
 class ProviderError(RuntimeError):
-    """查词失败（网络、鉴权、解析等）。"""
+    """查词失败（网络、鉴权、解析等）。
+
+    `status` 是 HTTP 状态码（拿不到时为 None）。把它挂在异常上而不是只写进
+    文案里：统计与界面要按状态码分流（401 该去改密钥、429 该等一会儿、
+    5xx 该重试），而从一句中文里正则抠数字是另一套解析，两份一定会分叉。
+    """
+
+    def __init__(self, message: str, *, status: int | None = None) -> None:
+        super().__init__(message)
+        self.status = status
 
 
 class NonRetryableError(ProviderError):

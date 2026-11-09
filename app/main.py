@@ -22,6 +22,7 @@ from .config import (
 )
 from .core import analytics
 from .core.db import (
+    RestoreFailed,
     backup_to,
     connect,
     init_db,
@@ -29,6 +30,7 @@ from .core.db import (
     stage_restore,
 )
 from .core.dictionary import DictionaryService
+from .core.log import get_logger, install_excepthook, setup_logging
 from .core.repository import Repository
 from .providers import build_provider
 from .security.keystore import load_api_key
@@ -180,11 +182,20 @@ def _vocab_bucket(conn) -> str:
 
 
 def main() -> int:
-    migrate_legacy_home()
+    # 日志要在**迁移之前**就位：迁移是会动用户数据的操作，它失败的那一次
+    # 最需要留痕，而它恰好发生在所有正常路径之前。
+    migrated = migrate_legacy_home()
     ensure_dir()
+    setup_logging(APP_DIR)
+    log = get_logger("main")
+    if migrated:
+        log.info("已从旧数据目录迁移到 %s", APP_DIR)
     config = load_config()
 
     app = QApplication(sys.argv)
+    # 挂 excepthook 必须在 QApplication 之后：它出错时要用对话框告诉用户
+    # 日志在哪，没有 QApplication 就只剩一行写进文件的记录。
+    install_excepthook()
     app.setApplicationName(APP_NAME)
     app.setStyleSheet(stylesheet(config.get("theme")))
 
@@ -222,14 +233,31 @@ def main() -> int:
 
         三步的顺序都不能换：先做保护性备份 → 把旧库的 WAL 回写并关闭 →
         替换。少了第一步，用户在恢复之后会觉得「还是原来那份好」而回不去。
+
+        **替换那一步的失败必须单独标出来。** 走到那里时连接已经关了，而界面
+        还活着：此刻任何一次读写都会抛 `ProgrammingError`。所以抛
+        `RestoreFailed(conn_closed=True)`，让界面把「需要重启」说清楚，
+        而不是沿用「当前数据没有被改动」——那句话会让用户继续操作。
         """
-        guard = backup_to(
-            conn, APP_DIR / f"arcquill_before_restore_{datetime.now():%Y%m%d-%H%M%S}.db"
-        )
-        staged = stage_restore(backup, DB_PATH)
+        try:
+            guard = backup_to(
+                conn,
+                APP_DIR / f"arcquill_before_restore_{datetime.now():%Y%m%d-%H%M%S}.db",
+            )
+            staged = stage_restore(backup, DB_PATH)
+        except Exception as exc:  # noqa: BLE001 - 这一步失败时连接还完好
+            raise RestoreFailed(str(exc) or exc.__class__.__name__, conn_closed=False) from exc
+
         conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
         conn.close()
-        replace_with_staged(staged, DB_PATH)
+        try:
+            replace_with_staged(staged, DB_PATH)
+        except Exception as exc:  # noqa: BLE001 - 已关连接，不能再说「继续用」
+            raise RestoreFailed(
+                str(exc) or exc.__class__.__name__,
+                conn_closed=True,
+                guard=guard,
+            ) from exc
         return guard
 
     window.restore_hook = _restore_flow

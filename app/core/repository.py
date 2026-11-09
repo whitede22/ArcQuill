@@ -658,9 +658,16 @@ class Repository:
             int(row["review_count"] or 0),
             grade,
         )
-        self.conn.execute(
-            "UPDATE entries SET review_due = ?, review_interval = ?, "
-            "review_count = ?, review_ease = ?, updated_at = ? WHERE id = ?",
-            (due_timestamp(now, interval), interval, count, ease, format_timestamp(now), entry_id),
-        )
+        # 与 `upsert` 同一条理由：异常后连接会停在 `in_transaction=True`，
+        # 下一次任意成功操作的 commit() 会把这次的半成品一并提交。显式回滚，
+        # 把「写坏了」变成「这次没写成」。
+        try:
+            self.conn.execute(
+                "UPDATE entries SET review_due = ?, review_interval = ?, "
+                "review_count = ?, review_ease = ?, updated_at = ? WHERE id = ?",
+                (due_timestamp(now, interval), interval, count, ease, format_timestamp(now), entry_id),
+            )
+        except Exception:
+            self.conn.rollback()
+            raise
         self.conn.commit()

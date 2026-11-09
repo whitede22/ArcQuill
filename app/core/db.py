@@ -503,6 +503,36 @@ def inspect_backup(path: Path | str) -> str:
     return ""
 
 
+class RestoreFailed(RuntimeError):
+    """恢复失败，并且知道「连接关没关」。
+
+    界面要据此说两句完全不同的话：
+
+    - `conn_closed=False`：失败发生在替换之前，连接好着，数据确实一点没动，
+      用户可以继续用，说「当前数据没有被改动」是实话；
+    - `conn_closed=True`：文件替换那一步失败，而替换**必须**在关闭连接之后做
+      （Windows 上打开着的库文件 `os.replace` 必失败），所以此刻窗口还活着、
+      连接已经关了。再说「没有被改动」会引着用户继续操作，而之后每一次读写
+      都会抛 `ProgrammingError`。
+
+    把标志带在异常上，而不是让界面去猜，是因为这两种情况的区别在关闭连接的
+    那一刻，只有调用方知道。
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        conn_closed: bool,
+        guard: Path | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.conn_closed = conn_closed
+        # 恢复前那次保护性备份的落盘路径。替换失败时它已经写好了，要告诉用户去
+        # 哪找——否则「你的数据还在」这句话在文件系统里没有落点。
+        self.guard = guard
+
+
 def stage_restore(backup: Path | str, target: Path | str) -> Path:
     """把备份复制到目标库旁边的临时文件，供调用方在**关闭连接之后**替换。
 

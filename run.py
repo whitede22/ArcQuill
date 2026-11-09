@@ -48,6 +48,25 @@ def _cleanup_home(path: Path) -> None:
     print(f"警告：自检临时目录未能删除，可手动清理：{path}")
 
 
+def _selfcheck_home() -> Path:
+    """自检用的数据目录。
+
+    读环境变量而不是重复塞一个常量：`app.config` 在 import 时就把 `APP_DIR`
+    定死了，12 个自检段落各自去 `os.environ["..."]` 取值时，只要有一处名字
+    写错就直接 `KeyError`，被外层 `except` 吞成一条 FAIL——失败原因与产物
+    毫无关系，而这是发版前唯一用来验产物的工具。改名那一次就是这么坏的：
+    第 54 行写新名，其余十二处仍是旧名，27 项里 15 项红。
+
+    先认新名，再回落旧名：`QUILL_HOME` 是改名前的名字，外部脚本与旧文档
+    里可能还在用，保留一个别名不花任何代价。
+    """
+    for name in ("ARCQUILL_HOME", "QUILL_HOME"):
+        value = os.environ.get(name)
+        if value:
+            return Path(value)
+    raise RuntimeError("自检数据目录未设置（ARCQUILL_HOME）")
+
+
 def run_selfcheck() -> int:
     # 使用临时数据目录，避免自检污染用户生词本
     home = Path(tempfile.mkdtemp(prefix="arcquill_selfcheck_"))
@@ -85,7 +104,7 @@ def run_selfcheck() -> int:
         from app.core.models import Entry, Synonym
         from app.core.repository import Repository
 
-        conn = connect(Path(os.environ["QUILL_HOME"]) / "selfcheck.db")
+        conn = connect(_selfcheck_home() / "selfcheck.db")
         init_db(conn)
         repo = Repository(conn)
         repo.upsert(
@@ -167,7 +186,7 @@ def run_selfcheck() -> int:
         from app.ui.main_window import MainWindow
         from app.ui.theme import stylesheet
 
-        conn = connect(Path(os.environ["QUILL_HOME"]) / "ui.db")
+        conn = connect(_selfcheck_home() / "ui.db")
         init_db(conn)
         repo = Repository(conn)
         service = DictionaryService(repo, MockProvider())
@@ -210,7 +229,7 @@ def run_selfcheck() -> int:
         from app.core.models import Entry
         from app.core.repository import Repository
 
-        home = Path(os.environ["QUILL_HOME"])
+        home = _selfcheck_home()
         src = connect(home / "backup_src.db")
         init_db(src)
         Repository(src).upsert(Entry(lemma="backup", definition_zh="备份"))
@@ -234,7 +253,7 @@ def run_selfcheck() -> int:
         from app.core.models import Entry
         from app.core.repository import Repository
 
-        fconn = connect(Path(os.environ["QUILL_HOME"]) / "fts.db")
+        fconn = connect(_selfcheck_home() / "fts.db")
         init_db(fconn)
         frepo = Repository(fconn)
         frepo.upsert(
@@ -274,7 +293,7 @@ def run_selfcheck() -> int:
             def lookup(self, word: str) -> Entry:
                 return Entry(lemma=word, definition_en="refreshed", definition_zh="刷新后")
 
-        uconn = connect(Path(os.environ["QUILL_HOME"]) / "userfield.db")
+        uconn = connect(_selfcheck_home() / "userfield.db")
         init_db(uconn)
         urepo = Repository(uconn)
         urepo.upsert(
@@ -338,7 +357,7 @@ def run_selfcheck() -> int:
         from app.core.models import Entry
         from app.core.repository import Repository
 
-        xconn = connect(Path(os.environ["QUILL_HOME"]) / "exportcap.db")
+        xconn = connect(_selfcheck_home() / "exportcap.db")
         init_db(xconn)
         xrepo = Repository(xconn)
         for i in range(4):
@@ -383,7 +402,7 @@ def run_selfcheck() -> int:
     try:
         from app import config as config_module
 
-        cfg_dir = Path(os.environ["QUILL_HOME"]) / "cfgprobe"
+        cfg_dir = _selfcheck_home() / "cfgprobe"
         cfg_dir.mkdir(parents=True, exist_ok=True)
         saved_dir, saved_path = config_module.APP_DIR, config_module.CONFIG_PATH
         config_module.APP_DIR = cfg_dir
@@ -427,7 +446,7 @@ def run_selfcheck() -> int:
 
         import sqlite3 as _sqlite3
 
-        legacy_dir = Path(os.environ["QUILL_HOME"]) / "legacycol"
+        legacy_dir = _selfcheck_home() / "legacycol"
         legacy_dir.mkdir(parents=True, exist_ok=True)
         legacy_path = legacy_dir / "old.db"
         raw = _sqlite3.connect(str(legacy_path))
@@ -478,7 +497,7 @@ def run_selfcheck() -> int:
         from app.providers.mock import MockProvider
         from app.providers.prompts import PROMPT_VERSION
 
-        vconn = _connect(Path(os.environ["QUILL_HOME"]) / "verprobe.db")
+        vconn = _connect(_selfcheck_home() / "verprobe.db")
         _init(vconn)
         svc = DictionaryService(_Repo(vconn), MockProvider())
         fresh, cached = svc.lookup("meticulous")
@@ -524,7 +543,7 @@ def run_selfcheck() -> int:
         from app.providers.openai_compat import build_provider
 
         _saved = (_cfg_mod.APP_DIR, _cfg_mod.CONFIG_PATH)
-        _rt = Path(os.environ["QUILL_HOME"]) / "fallback_cfg"
+        _rt = _selfcheck_home() / "fallback_cfg"
         _rt.mkdir(parents=True, exist_ok=True)
         _cfg_mod.APP_DIR = _rt
         _cfg_mod.CONFIG_PATH = _rt / "config.json"
@@ -559,7 +578,7 @@ def run_selfcheck() -> int:
         from app.core.models import Entry as _Entry20, join_tags
         from app.core.repository import Repository as _Repo20
 
-        tconn = _conn20(Path(os.environ["QUILL_HOME"]) / "tagprobe.db")
+        tconn = _conn20(_selfcheck_home() / "tagprobe.db")
         _init20(tconn)
         trepo = _Repo20(tconn)
         # 界面写入路径：用户敲「考研,  高频」→ 归一 → 落库
@@ -638,7 +657,7 @@ def run_selfcheck() -> int:
         from app.core.models import Entry as _Entry22, Phrase as _Phrase22
         from app.core.repository import Repository as _Repo22
 
-        pconn = _connect(Path(os.environ["QUILL_HOME"]) / "phrases.db")
+        pconn = _connect(_selfcheck_home() / "phrases.db")
         _init(pconn)
         prepo = _Repo22(pconn)
         word = prepo.upsert(_Entry22(lemma="charge", definition_zh="收费"))

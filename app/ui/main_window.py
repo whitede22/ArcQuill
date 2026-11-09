@@ -49,7 +49,7 @@ from ..config import (
     save_config,
 )
 from ..core import analytics
-from ..core.db import backup_to, rebuild_fts
+from ..core.db import RestoreFailed, backup_to, rebuild_fts
 from ..core.dictionary import DictionaryService
 from ..core.exporter import (
     PdfFontUnavailable,
@@ -71,6 +71,7 @@ from ..core.importer import (
     split_words,
 )
 from ..core import review
+from ..core.log import get_logger, log_exception
 from ..core.models import Entry, Phrase, join_tags
 from ..core.repository import Repository
 from ..providers import build_provider, provider_status
@@ -338,6 +339,10 @@ class MainWindow(QMainWindow):
         # 备份恢复要关掉 main 里那个连接才能替换文件，所以具体流程由 main 注入。
         # 为 None 时（自检、截图脚本直接构造窗口）按钮不出现。
         self.restore_hook = None
+        # 恢复失败且连接已关时置位：此后所有写操作都不该再试（见
+        # `_handle_restore_failure`）。放在这里而不是 `__init__`，是因为它属于
+        # 「这一次运行的状态」，与上面几项同类。
+        self._session_dead = False
 
     def _start(self) -> None:
         """窗口外观、界面装配与启动序列。顺序有依赖，见各步注释。"""
@@ -454,10 +459,13 @@ class MainWindow(QMainWindow):
     def _should_hide_to_tray(self) -> bool:
         """关窗口时该不该收进托盘，而不是真退出。
 
-        三个条件缺一不可：不是真退出、托盘真的在、配置还开着。
+        四个条件缺一不可：不是真退出、这次会话还能用、托盘真的在、配置还开着。
+        「会话还能用」这一条是恢复失败之后的出口：连接已关，窗口藏进托盘就成
+        一个既不能用、也退不掉的进程。
         """
         return (
             not self._quitting
+            and not self._session_dead
             and self._tray is not None
             and self._tray.isVisible()
             and bool(self.config.get("tray_enabled", True))
@@ -768,6 +776,48 @@ class MainWindow(QMainWindow):
         root.addWidget(self._build_splitter(), 1)
         self.setCentralWidget(central)
         self._build_status_bar()
+        self._build_toast()
+
+    def _build_toast(self) -> None:
+        """查词结果那条「已保存至生词表」。
+
+        为什么是浮层而不是状态栏：状态栏那一行同时在说来源（「已从接口获取并
+        保存」）与缺项（「但缺少同义语」），再塞一句「已保存」会互相盖掉。而
+        「我查过的词去哪了」正是本产品最容易误解的一件事——查词即写库，界面上
+        却没有「保存」这个动作，用户只能靠一句明确的回执确认它真的进去了。
+
+        它**不是**模态框：查词是高频动作，每查一个词弹一个需要点「确定」的窗，
+        读文章时每词多一次点击，等于把零摩擦的设计改回去。
+        """
+        self._toast = QLabel(self)
+        self._toast.setObjectName("toast")
+        self._toast.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._toast.hide()
+        self._toast_timer = QTimer(self)
+        self._toast_timer.setSingleShot(True)
+        self._toast_timer.timeout.connect(self._toast.hide)
+
+    def _show_toast(self, text: str) -> None:
+        """在窗口下沿显示一句话，2.4 秒后自己消失。"""
+        self._toast.setText(text)
+        self._toast.adjustSize()
+        self._place_toast()
+        self._toast.show()
+        self._toast.raise_()
+        self._toast_timer.start(2400)
+
+    def _place_toast(self) -> None:
+        """贴着状态栏上沿居中。窗口缩放时也要重摆，否则它会飘在半空。"""
+        bar = self.statusBar()
+        bottom = bar.height() if bar is not None else 24
+        x = max(12, (self.width() - self._toast.width()) // 2)
+        y = max(12, self.height() - self._toast.height() - bottom - 12)
+        self._toast.move(x, y)
+
+    def resizeEvent(self, event) -> None:  # noqa: N802 - Qt 命名
+        super().resizeEvent(event)
+        if getattr(self, "_toast", None) is not None and self._toast.isVisible():
+            self._place_toast()
 
     def _build_top_bar(self, root: QVBoxLayout) -> None:
         """顶部一行：字标、输入框、主操作、常规与次要三档按钮。"""
@@ -1373,8 +1423,8 @@ class MainWindow(QMainWindow):
         self._pending_tags = (entry_id, text)
         self._note_timer.start()
 
-    def _flush_edits(self) -> None:
-        """把压在内存里的备注与标签落库。
+    def _flush_edits(self) -> bool:
+        """把压在内存里的备注与标签落库。全部写成功返回 True。
 
         两条待写值各自**重新从库里读一次**再写，而不是复用同一份 entry 对象：
         `repo.upsert()` 写的是整行，若两次写入共用一份旧副本，后写的那次会把
@@ -1383,7 +1433,18 @@ class MainWindow(QMainWindow):
 
         落库的形态也要在这里统一（`join_tags`）：界面输入允许逗号与空格混用，
         而库里存的必须是单空格分隔，否则按标签筛选只能退化成子串匹配。
+
+        **写失败时不能先把待写值清掉。** 原先的顺序是「清空待写 → 逐条写库」，
+        磁盘满或锁超时时 `repo.upsert` 一抛，这次编辑在内存里也没了：输入框还
+        显示着刚写的字，库里没有，用户以为已经保存。现在改成先写、成功的那条
+        才销账，失败的那条放回待写位，等下一次防抖或下一次切换词条再试。
         """
+        if self._session_dead:
+            # 连接已经关了（恢复失败后的状态）。再试一次只会把 sqlite 的
+            # `Cannot operate on a closed database` 糊到用户脸上；而且这次失败
+            # 会让 closeEvent 弹出「还有内容没保存」——那句话说反了，此刻根本
+            # 没有能保存的地方。返回 True 让关闭流程安静走完。
+            return True
         jobs: list[tuple[int, str, str]] = []
         if self._pending_note is not None:
             entry_id, text = self._pending_note
@@ -1394,24 +1455,49 @@ class MainWindow(QMainWindow):
         self._pending_note = None
         self._pending_tags = None
 
+        ok = True
         for entry_id, field, value in jobs:
-            entry = self.repo.get_by_id(entry_id)
-            if entry is None:
-                continue  # 写回之前那条已被删掉：没什么可保存的
-            if field == "tags":
-                value = join_tags(value)
-            # 「值没变就不写」：落库会顺带重建 FTS 行，而这条路径由输入防抖
-            # 触发，用户在备注里每停 600ms 就写一次库是没必要的。
-            if getattr(entry, field) == value:
+            label = "备注" if field == "notes" else "标签"
+            try:
+                entry = self.repo.get_by_id(entry_id)
+                if entry is None:
+                    continue  # 写回之前那条已被删掉：没什么可保存的
+                if field == "tags":
+                    value = join_tags(value)
+                # 「值没变就不写」：落库会顺带重建 FTS 行，而这条路径由输入防抖
+                # 触发，用户在备注里每停 600ms 就写一次库是没必要的。
+                if getattr(entry, field) == value:
+                    continue
+                setattr(entry, field, value)
+                self.repo.upsert(entry)
+            except Exception as exc:  # noqa: BLE001 - 写库失败必须让用户看见
+                ok = False
+                # 只记字段名与异常类型：备注正文不进日志（见 core/log.py）。
+                log_exception(
+                    get_logger("ui.edit"), f"{label}写入失败 field={field}", exc
+                )
+                self._restore_pending(field, entry_id, value)
+                self.statusBar().showMessage(
+                    f"{label}没能保存，稍后会再试一次（日志里有记录）"
+                )
                 continue
-            setattr(entry, field, value)
-            self.repo.upsert(entry)
-            self.statusBar().showMessage(
-                f"{'备注' if field == 'notes' else '标签'}已保存 · {entry.lemma}"
-            )
+            self.statusBar().showMessage(f"{label}已保存 · {entry.lemma}")
+        return ok
+
+    def _restore_pending(self, field: str, entry_id: int, value: str) -> None:
+        """把没写成功的那条放回待写位。
+
+        若用户在等待期间又输入了新的内容（`_pending_*` 已非空），**不覆盖**：
+        新输入比旧输入更接近用户想要的最终状态，而旧的那份已经被这次失败证明
+        写不进去，留着它只会在下一次 flush 时把新内容压掉。
+        """
+        if field == "notes" and self._pending_note is None:
+            self._pending_note = (entry_id, value)
+        elif field == "tags" and self._pending_tags is None:
+            self._pending_tags = (entry_id, value)
 
     def closeEvent(self, event) -> None:  # noqa: N802 - Qt 命名
-        self._flush_edits()
+        flushed = self._flush_edits()
         self._save_state()
         # 有托盘时，「关窗口」只是收起来。这一步必须排在下面那些取消动作**之前**：
         # 收进托盘之后导入、重查都还在跑，把它们取消掉属于另一个 bug。
@@ -1420,6 +1506,20 @@ class MainWindow(QMainWindow):
             self.hide()
             self._hint_hidden_to_tray()
             return
+        # 真的退出，而刚才那次 flush 没写成：这一走内存里那份就没了，得先问一句。
+        # 收进托盘的分支不问——进程还活着，待写值还在，下次 flush 会再试。
+        if not flushed:
+            answer = QMessageBox.question(
+                self,
+                "还有内容没保存",
+                "刚才的备注或标签没能写进数据库。现在退出，这次编辑会丢失。\n\n"
+                "仍然退出吗？",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                event.ignore()
+                return
         # 真的退出：先撤托盘与热键。热键是系统级独占资源，进程走了却没撤，
         # 下一次启动会注册失败，而用户看到的只是「热键突然不好使了」。
         self._teardown_tray()
@@ -1466,6 +1566,9 @@ class MainWindow(QMainWindow):
         """
         text = self.input.text().strip()
         if not text:
+            return
+        if self._session_dead:
+            self.statusBar().showMessage("数据库连接已关闭，请重启程序后再查词")
             return
         if self._import_progress is not None or self._refresh_progress is not None:
             # 批量查词与文件导入共用同一条队列与 id 快照，同时在飞会互相抢；
@@ -1744,7 +1847,7 @@ class MainWindow(QMainWindow):
                 "word_added", {"source_type": self._pending_source}
             )
         self._pending_source = "manual"
-        self._present_entry(entry, self._origin_of(entry, cached))
+        self._present_entry(entry, self._origin_of(entry, cached), saved=not cached)
 
     @staticmethod
     def _origin_of(entry, cached: bool) -> str:
@@ -1776,8 +1879,13 @@ class MainWindow(QMainWindow):
             return
         self._present_entry(entry, "已重新查询并更新")
 
-    def _present_entry(self, entry, origin: str) -> None:
-        """把查到的词条呈现到界面（两个入口共用，避免呈现逻辑各自漂移）。"""
+    def _present_entry(self, entry, origin: str, *, saved: bool | None = None) -> None:
+        """把查到的词条呈现到界面（两个入口共用，避免呈现逻辑各自漂移）。
+
+        `saved` 回答「这一次有没有真的写进库」：True 是新写入，False 是命中缓存
+        或重查（库里的那条本来就在）。None 表示这个入口不弹回执。判据由调用方
+        给，不在这里猜——只有它知道 `lookup()` 返回的 `cached` 是真是假。
+        """
         self.input.clear()
         # 查词的结果属于生词本。若用户此刻正在看词组收藏，先切回去：否则会出现
         # 「右侧显示刚查到的词、左栏列的全是词组」这种自相矛盾的一屏，而下面那句
@@ -1804,6 +1912,14 @@ class MainWindow(QMainWindow):
         else:
             self.statusBar().showMessage(f"{entry.lemma} — {origin}")
 
+        # 「收进去了」的回执。查词即写库是这个产品的语义，而界面上没有「保存」
+        # 这个动作，用户只能凭这一句确认。命中缓存时也照实说：说「已保存」会
+        # 让他以为又存了一条，说「已在」才是他此刻该知道的事。
+        if saved is True:
+            self._show_toast("已保存至生词表")
+        elif saved is False:
+            self._show_toast("已在生词表中")
+
     def _on_error(self, message: str, kind: str, seq: int) -> None:
         # 已被更新的请求取代时静默丢弃：用户已经在等新结果，
         # 为一次过期的失败弹窗只会造成困惑
@@ -1816,7 +1932,19 @@ class MainWindow(QMainWindow):
         analytics.record_event(
             "app_error", {"error_code": kind, "op": self._op_name}
         )
-        self.statusBar().showMessage("查询失败")
+        # 鉴权失败要给出可执行的下一步。原来只有一句「请检查密钥是否正确」，
+        # 而用户此刻看到的是「查询失败」加一段技术说明——他知道坏了，但不知道
+        # 去哪改。这一类失败**不再兜底**（见 providers/fallback.py），所以这条
+        # 提示是他唯一的指引，必须把入口与验证方式一起写出来。
+        if kind == "auth":
+            message = (
+                f"{message}\n\n"
+                "到右上角「设置」核对密钥与接口地址，填完用旁边的「测试连接」验一次；"
+                "通过之后再查词。"
+            )
+            self.statusBar().showMessage("查询失败 — 密钥未通过验证")
+        else:
+            self.statusBar().showMessage("查询失败")
         QMessageBox.warning(self, "查询失败", message)
 
     # ---------- 批量重查 ----------
@@ -2109,8 +2237,20 @@ class MainWindow(QMainWindow):
         # `INTEGER PRIMARY KEY AUTOINCREMENT`，SQLite 用 `sqlite_sequence`
         # 记住用过的最大值，删行之后也不会再把那个号发出去（自检里有一条断言
         # 专门拿它当反例钉住）。真正必须清空 id 的理由见 `_undo_delete`。
+        #
+        # 写库失败要当场说：删不掉的词条还留在列表里，界面上那句「已删除」就是
+        # 假话，而用户会以为它已经没了。
+        try:
+            self.repo.delete(entry_id)
+        except sqlite3.Error as exc:
+            log_exception(get_logger("ui.delete"), "删除词条失败", exc)
+            QMessageBox.warning(
+                self,
+                "删除失败",
+                f"没能删除「{entry.lemma}」，它还在生词本里。\n\n{exc}",
+            )
+            return
         self._last_deleted = ("word", entry)
-        self.repo.delete(entry_id)
         # 「撤销」只在刚刚删过之后才有意义，所以它跟着这次删除出现；下一次删除
         # 会把候选换成新的那一条（见 _undo_delete）。
         self.btn_undo.setVisible(True)
@@ -2180,8 +2320,17 @@ class MainWindow(QMainWindow):
         was_displayed = phrase_id == self._displayed_id
         # 与删除词条同一个取舍：留**整条**快照，而不是只记一个 id——撤销要放回去
         # 的是简释与例句，它们只存在这条记录里。
+        try:
+            self.repo.delete_phrase(phrase_id)
+        except sqlite3.Error as exc:
+            log_exception(get_logger("ui.delete"), "移出词组失败", exc)
+            QMessageBox.warning(
+                self,
+                "移出失败",
+                f"没能把「{phrase.phrase}」移出词组收藏，它还在里面。\n\n{exc}",
+            )
+            return
         self._last_deleted = ("phrase", phrase)
-        self.repo.delete_phrase(phrase_id)
         self.btn_undo.setVisible(True)
         self.statusBar().showMessage(f"已移出词组收藏「{phrase.phrase}」")
 
@@ -3057,6 +3206,9 @@ class MainWindow(QMainWindow):
             return
         try:
             guard = hook(backup)
+        except RestoreFailed as exc:
+            self._handle_restore_failure(exc)
+            return
         except Exception as exc:  # noqa: BLE001 - 文件锁、权限、坏库都要如实说
             QMessageBox.critical(
                 self, "恢复失败", f"{exc}\n\n当前数据没有被改动。"
@@ -3072,6 +3224,52 @@ class MainWindow(QMainWindow):
         app = QApplication.instance()
         if app is not None:
             app.quit()
+
+    def _handle_restore_failure(self, exc: RestoreFailed) -> None:
+        """恢复失败的两条路径，说两句不同的话。
+
+        差别不在措辞，在**用户接下来该做什么**：
+
+        - 连接还在：数据确实没动，继续用就是了；
+        - 连接已关：文件替换那一步崩了（多半是被别的进程占着）。库文件本身
+          也没动，但这个进程的数据库连接已经关了，界面上的每一次读写都会抛
+          `ProgrammingError`。这时候必须停手、重启，而不是说「没有被改动」
+          让用户继续点。
+        """
+        if not exc.conn_closed:
+            QMessageBox.critical(self, "恢复失败", f"{exc}\n\n当前数据没有被改动。")
+            return
+
+        self._mark_session_dead()
+        where = (
+            f"\n\n替换前的那份数据已经另存为：\n{exc.guard}" if exc.guard else ""
+        )
+        QMessageBox.critical(
+            self,
+            "恢复未完成，需要重启",
+            f"覆盖文件这一步失败了：\n{exc}\n\n"
+            "生词本文件没有被改动，但这个程序已经关掉了数据库连接，"
+            "继续操作会一直报错。\n\n"
+            "请关掉程序重新打开，数据还是原来的那份。" + where,
+        )
+
+    def _mark_session_dead(self) -> None:
+        """把界面切到「只能看，不能用」，直到重启。
+
+        连接已经关了，而主窗口与工具栏还挂在这条死连接上。与其指望每个入口都
+        自己记住这件事，不如一次性把能点的东西关掉：漏一个入口的表现就是用户
+        点下去、界面弹一个 `Cannot operate on a closed database`。
+
+        **托盘菜单不关**：它只有「显示主窗口」与「退出」两条，都不碰数据库，
+        而关掉它等于让用户连退出都找不到。同时把「关窗口收进托盘」这条路径
+        停掉（见 `_should_hide_to_tray`），否则用户点了关闭、窗口藏进托盘、
+        而它已经不能用，就只剩强杀进程一条路。
+        """
+        self._session_dead = True
+        central = self.centralWidget()
+        if central is not None:
+            central.setEnabled(False)
+        self.statusBar().showMessage("数据库连接已关闭，请重启程序")
 
     def _open_settings(self) -> None:
         # 主题走即时预览：配色是**看着挑**的，若要先保存再看效果，用户得在设置

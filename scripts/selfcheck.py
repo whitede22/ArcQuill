@@ -12,6 +12,7 @@ import fnmatch
 import gc
 import io
 import json
+import logging
 import os
 import re
 import shutil
@@ -40,6 +41,7 @@ from app.core.db import (  # noqa: E402
     FTS_COLUMNS,
     FTS_WEIGHTS,
     SCHEMA_VERSION,
+    RestoreFailed,
     backup_to,
     connect,
     fts_in_sync,
@@ -69,7 +71,16 @@ from app.core.exporter import (  # noqa: E402
 )
 from app.core.exporter import _PDF_RULE_COLOR  # noqa: E402
 from app.core.lemmatizer import candidates as lemma_candidates  # noqa: E402
+from app import config as config_mod  # noqa: E402
 from app import theme_meta as theme_meta_mod  # noqa: E402
+from app.core.errors import classify as classify_error  # noqa: E402
+from app.core.log import (  # noqa: E402
+    LOGGER_NAME,
+    get_logger,
+    log_exception,
+    scrub as log_scrub,
+    setup_logging,
+)
 from app.ui import theme as theme_mod  # noqa: E402
 from app.ui import background as background_mod  # noqa: E402
 from app.ui.background import (  # noqa: E402
@@ -82,7 +93,12 @@ from app.ui.background import (  # noqa: E402
 from app.ui import onboarding as ob_mod  # noqa: E402
 from app.core.models import Entry, Phrase, Synonym, join_tags, split_tags  # noqa: E402
 from app.core.repository import Repository, build_fts_query  # noqa: E402
-from app.providers.base import DictionaryProvider  # noqa: E402
+from app.providers.base import (  # noqa: E402
+    DictionaryProvider,
+    NonRetryableError,
+    ProviderError,
+)
+from app.providers.fallback import FallbackProvider  # noqa: E402
 from app.providers.mock import MockProvider  # noqa: E402
 from app.providers.openai_compat import (  # noqa: E402
     build_endpoint,
@@ -315,7 +331,26 @@ def _cleanup_tmpdir(path: Path) -> None:
             gc.collect()  # 进一步回收 Qt 包装对象
             time.sleep(0.05 * (attempt + 1))
     if path.exists():
+        # 「删不掉」必须指得出是哪个文件：只说一个目录名，下一个人还得自己
+        # 二分。这里逐个试删，把真正被占着的那几个报出来。
+        blocked: list[str] = []
+        for item in sorted(path.rglob("*")):
+            if item.is_file():
+                try:
+                    item.unlink()
+                except OSError as exc:
+                    blocked.append(f"{item.name}（{exc.__class__.__name__}）")
         print(f"  WARN  临时目录未能删除（不影响结论）：{path}", flush=True)
+        if blocked:
+            print(f"        仍被占用的文件：{', '.join(blocked[:6])}", flush=True)
+        else:
+            # 文件都删掉了，剩下的是空目录：再 rmtree 一次就能清干净。
+            # 少了这一步，「逐文件删」只解决了半个问题，残留目录照样被
+            # `_verify_no_temp_leftovers` 判红。
+            try:
+                shutil.rmtree(path)
+            except OSError:
+                pass
 
 
 def main() -> int:
@@ -2581,11 +2616,14 @@ def main() -> int:
             not _lit_bad,
             "; ".join(_lit_bad),
         )
-        # 区间断言：36 是本仓的真实文件数。比这少说明漏扫（有源码没被这条规矩
+        # 区间断言：扫描范围只覆盖本仓源码。比这少说明漏扫（有源码没被这条规矩
         # 覆盖），比这多得多说明扫进了 .venv —— 两种都算这条检查本身不成立。
+        # 上界 80 是给「本仓还会继续加文件」留的余量：判据要拦的是扫错目录
+        # （.venv 那边是四位数），不是精确计数，写死成当前文件数只会让人每次
+        # 加一个模块都要来改一次测试。
         check(
             "汉字字面量扫描范围恰为本仓源码（不多不少）",
-            30 <= len(_own_src) <= 60,
+            30 <= len(_own_src) <= 80,
             f"扫到 {len(_own_src)} 个 .py",
         )
         _forms = _o.execute("SELECT COUNT(*) FROM forms").fetchone()[0]
@@ -6434,6 +6472,158 @@ def main() -> int:
     finally:
         for _key in ("REPORT_KEY", "SMTP_USER", "MAIL_TO"):
             os.environ.pop(_key, None)
+
+    # ---- P0 修复的回归断言 ----
+    #
+    # 这一批改动全在**失败路径**上：打包自检、确定性错误、写库失败、迁移删除、
+    # 恢复失败。它们平时一声不响，真出问题时又不给第二次机会。没有断言盯着，
+    # 下一次改动会悄无声息地把它们改回去——而那时唯一的发现方式就是用户丢数据。
+
+    # 1) 打包自检不许再出现「一处新名、其余旧名」的半截改名。
+    _run_src = (ROOT / "run.py").read_text(encoding="utf-8")
+    check(
+        "run.py 不再裸取旧环境变量 QUILL_HOME",
+        'os.environ["QUILL_HOME"]' not in _run_src,
+        "改名只改一半时，打包自检 27 项里红 15 项，而红的原因与产物无关",
+    )
+    check(
+        "run.py 的数据目录统一走 _selfcheck_home()",
+        _run_src.count("_selfcheck_home()") >= 12,
+        f"实际 {_run_src.count('_selfcheck_home()')} 处",
+    )
+
+    # 2) 确定性失败不得兜底：兜底之后界面会说「查到了，来自本机离线词库」，
+    #    而密钥明明填错了。这一条是「静默降级」的直接反面。
+    class _AuthFailProvider:
+        name = "openai-compat"
+
+        def lookup(self, word):
+            raise NonRetryableError("API 鉴权失败（401）", status=401)
+
+        def lookup_phrase(self, phrase):
+            raise NonRetryableError("API 鉴权失败（401）", status=401)
+
+    class _TimeoutProvider:
+        name = "openai-compat"
+
+        def lookup(self, word):
+            raise ProviderError("请求超时")
+
+        def lookup_phrase(self, phrase):
+            raise ProviderError("请求超时")
+
+    class _OfflineStub:
+        name = "offline"
+
+        def lookup(self, word):
+            return Entry(lemma=word, definition_en="en", definition_zh="中")
+
+        def lookup_phrase(self, phrase):
+            raise ProviderError("离线不含词组")
+
+    try:
+        FallbackProvider(_AuthFailProvider(), _OfflineStub()).lookup("ubiquitous")
+        check("鉴权失败不兜底（必须抛错）", False, "被兜底了：界面会显示成查询成功")
+    except NonRetryableError:
+        check("鉴权失败不兜底（必须抛错）", True)
+    except Exception as exc:  # noqa: BLE001
+        check("鉴权失败不兜底（必须抛错）", False, f"抛了别的类型：{type(exc).__name__}")
+
+    _fb = FallbackProvider(_TimeoutProvider(), _OfflineStub()).lookup("ubiquitous")
+    check("超时仍然兜底", _fb.source == "offline" and bool(_fb.fallback_reason))
+    check("兜底产出带失败原因", "超时" in (_fb.fallback_reason or ""))
+
+    # 3) 状态码归类。401 与 5xx 的处理方式相反（一个让用户改配置，一个让程序重试），
+    #    混成同一类之后报告里就再也分不出来了。
+    check("401 归类为 auth", classify_error(NonRetryableError("x", status=401)) == "auth")
+    check("404 归类为 http_4xx", classify_error(NonRetryableError("x", status=404)) == "http_4xx")
+    check("429 归类为 rate_limit", classify_error(ProviderError("x", status=429)) == "rate_limit")
+    check("503 归类为 http_5xx", classify_error(ProviderError("x", status=503)) == "http_5xx")
+    check(
+        "没带状态码的 provider 错误仍是 bad_response",
+        classify_error(ProviderError("x")) == "bad_response",
+    )
+
+    # 4) 日志不得写进用户内容与凭据。日志会被用户直接发到 issue 里，
+    #    他发的时候不会逐行检查。
+    _secret = "sk-abcdefghijklmnop1234"
+    check("抹除规则挡住密钥", _secret not in log_scrub(f"Authorization: {_secret}"))
+    check(
+        "抹除规则挡住引号内的词",
+        "ubiquitous" not in log_scrub("接口没有返回「ubiquitous」的释义"),
+    )
+    check("抹除后仍留得下可读的骨架", "鉴权失败" in log_scrub("API 鉴权失败（401）"))
+
+    _log_probe = tmpdir / "logprobe"
+    _log_file = setup_logging(_log_probe)
+    log_exception(
+        get_logger("selftest"),
+        "写入失败",
+        RuntimeError(f"接口没有返回「ubiquitous」的释义 {_secret}"),
+    )
+    for _handler in logging.getLogger(LOGGER_NAME).handlers:
+        _handler.flush()
+    _log_text = Path(_log_file).read_text(encoding="utf-8")
+    check("日志文件里没有词条原文", "ubiquitous" not in _log_text)
+    check("日志文件里没有密钥", _secret not in _log_text)
+    check("日志文件里有事件与栈", "写入失败" in _log_text and "RuntimeError" in _log_text)
+    # 探针用完必须收干净：处理器握着文件句柄时，atexit 里的 rmtree 在 Windows 上
+    # 删不掉这个目录，会以「临时目录未能清理」的形式变成一条无关的红。
+    for _handler in list(logging.getLogger(LOGGER_NAME).handlers):
+        _handler.close()
+        logging.getLogger(LOGGER_NAME).removeHandler(_handler)
+
+    # 5) 迁移的校验：只认「有 entries 表」会把页级损坏放过去，而放过去的代价是
+    #    旧目录的备份被删掉。
+    _good_db = tmpdir / "mig_good.db"
+    _bad_db = tmpdir / "mig_bad.db"
+    _empty_db = tmpdir / "mig_empty.db"
+    for _path, _rows in ((_good_db, 3), (_bad_db, 400)):
+        _c = sqlite3.connect(_path)
+        _c.execute("CREATE TABLE entries (id INTEGER PRIMARY KEY, lemma TEXT)")
+        _c.executemany(
+            "INSERT INTO entries (lemma) VALUES (?)",
+            [(f"w{index}",) for index in range(_rows)],
+        )
+        _c.commit()
+        _c.close()
+    _size = _bad_db.stat().st_size
+    with open(_bad_db, "r+b") as _fh:
+        _fh.truncate(int(_size * 0.55))
+    _c = sqlite3.connect(_empty_db)
+    _c.execute("CREATE TABLE entries (id INTEGER PRIMARY KEY, lemma TEXT)")
+    _c.commit()
+    _c.close()
+    check("迁移校验认得出正常的库", config_mod._db_has_entries(_good_db))
+    check("迁移校验拦下页级损坏的库", not config_mod._db_has_entries(_bad_db))
+    check("迁移校验拦下空库（有表没行）", not config_mod._db_has_entries(_empty_db))
+    _config_src = (ROOT / "app" / "config.py").read_text(encoding="utf-8")
+    check(
+        "迁移成功后不再删除旧目录",
+        "rmtree(source" not in _config_src,
+        "删除不可逆，判据误判一次用户就两头空",
+    )
+    check("迁移会留下来源说明", "migrated_from.txt" in _config_src)
+
+    # 6) 恢复失败要把「连接已关」带出来，界面据此说两句完全不同的话。
+    _rf = RestoreFailed("占用中", conn_closed=True, guard=Path("guard.db"))
+    check("恢复失败带出连接状态", _rf.conn_closed is True and str(_rf.guard) == "guard.db")
+    check(
+        "恢复失败的默认守卫路径为空",
+        RestoreFailed("x", conn_closed=False).guard is None,
+    )
+
+    # 7) 提示浮层的配色规则必须成对：只有底色或只有字色时，深色主题下会变成
+    #    深字压深底——本仓已经在这个坑里掉过三次（详情区、对话框、托盘菜单）。
+    _toast_qss = theme_mod.stylesheet()
+    _toast_at = _toast_qss.find("QLabel#toast")
+    _toast_block = _toast_qss[_toast_at : _toast_qss.find("}", _toast_at)]
+    check("提示浮层的样式规则存在", _toast_at >= 0)
+    check(
+        "提示浮层的底色与字色成对定义",
+        _toast_at >= 0 and "background:" in _toast_block and "color:" in _toast_block,
+        _toast_block[:120],
+    )
 
     conn.close()
 

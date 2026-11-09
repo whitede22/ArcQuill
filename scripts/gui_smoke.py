@@ -386,6 +386,19 @@ EXPECT: dict = {
     # 于是兜底/离线内容在**常驻可见**的状态栏上被冒充成接口结果——正是兜底
     # 功能专门要避免的那件事，而且比详情区更难不被看见。
     "查询后状态栏": lambda v: isinstance(v, str) and "内置示例" in v,
+    # 查词结果那条回执。文案与可见性成对：只验文案的话，一个建好却从不 show()
+    # 的浮层也能通过；只验可见的话，写成「已保存」以外的话看不出来。
+    "保存回执文案": "已保存至生词表",
+    "回执已自动收起": True,
+    # 写库失败时，这次编辑不能连内存里那份一起没掉。返回值与待写值项成对：
+    # 只验「没必要报错」的话，一个把异常吞掉的实现照样过。
+    "写失败后的返回值": False,
+    "写失败时的待写值": lambda v: isinstance(v, tuple) and v[1] == "磁盘写不进去的一条备注",
+    # 恢复失败的两条分支说法不同：连接已关要停手，没关就别吓用户。
+    "恢复失败后会话标记": True,
+    "恢复失败后界面停用": True,
+    "恢复失败后状态栏": lambda v: isinstance(v, str) and "重启" in v,
+    "替换前失败不停用界面": True,
     "兜底端到端状态栏": (
         lambda v: isinstance(v, str)
         and "接口请求失败" in v
@@ -994,6 +1007,12 @@ def main() -> int:
         results["左列表行数"] = window.list.count()
         results["计数标签"] = window.count_label.text()
         results["查询后状态栏"] = window.statusBar().currentMessage()
+        # 「查到的词进没进生词本」是本品最容易被误解的一件事：没有保存按钮，
+        # 用户只能凭这句回执确认。文案与可见性一起验——只验文案的话，一个
+        # 建好却从不 show() 的浮层照样能过。
+        results["保存回执文案"] = (
+            window._toast.text() if window._toast.isVisible() else "(未显示)"
+        )
 
         window.filter.setText("普遍")
         window._reload_list()
@@ -3914,10 +3933,83 @@ def main() -> int:
             flush=True,
         )
 
+    def p0_check() -> None:
+        """P0 修复的界面侧断言：保存回执、写失败不丢编辑、恢复失败后的停用态。
+
+        这三条的共同点是「平时看不见」：回执只在查词后闪 2.4 秒，写失败要磁盘满
+        才会发生，恢复失败要文件被占用才会发生。人工验一遍的成本很高，而它们
+        保护的恰好是用户数据与「我到底存没存上」这个判断，所以用桩把三条失败
+        路径都主动走一遍。
+        """
+        # ---- 回执已经收起 ----
+        # 查词在 300ms，回执 2.4 秒后自己消失。还挂着不走的浮层会一直压在正文上。
+        results["回执已自动收起"] = not window._toast.isVisible()
+
+        # ---- 写库失败：编辑不能跟着丢 ----
+        target = repo.get("ubiquitous")
+        if target is None:
+            results["写失败时的待写值"] = "缺少探针词条"
+            results["写失败后的返回值"] = "缺少探针词条"
+        else:
+            real_upsert = window.repo.upsert
+
+            def _boom(_entry: object) -> object:
+                raise RuntimeError("database is locked")
+
+            window.repo.upsert = _boom  # type: ignore[method-assign]
+            window._pending_note = (target.id, "磁盘写不进去的一条备注")
+            try:
+                flushed = window._flush_edits()
+            finally:
+                window.repo.upsert = real_upsert  # type: ignore[method-assign]
+            results["写失败时的待写值"] = window._pending_note
+            results["写失败后的返回值"] = flushed
+            # 回复现场：这条待写值留着会在后续阶段被真的写进库
+            window._pending_note = None
+
+        # ---- 恢复失败：连接已关时必须停手 ----
+        import app.ui.main_window as mw
+
+        real_box = mw.QMessageBox
+
+        class _CriticalStub:
+            StandardButton = real_box.StandardButton
+            critical = staticmethod(lambda *a, **k: None)
+            warning = staticmethod(lambda *a, **k: None)
+            information = staticmethod(lambda *a, **k: None)
+            question = staticmethod(lambda *a, **k: None)
+
+        from app.core.db import RestoreFailed
+
+        mw.QMessageBox = _CriticalStub  # type: ignore[assignment]
+        try:
+            # 替换文件那一步失败：库文件没动，但连接已关，界面必须停手
+            window._handle_restore_failure(
+                RestoreFailed("被另一个进程占用", conn_closed=True, guard=None)
+            )
+            results["恢复失败后会话标记"] = window._session_dead
+            central = window.centralWidget()
+            results["恢复失败后界面停用"] = bool(central is not None and not central.isEnabled())
+            results["恢复失败后状态栏"] = window.statusBar().currentMessage()
+
+            # 还回去：后面还有阶段要用界面
+            window._session_dead = False
+            if central is not None:
+                central.setEnabled(True)
+            if window._tray_menu is not None:
+                window._tray_menu.setEnabled(True)
+
+            # 反例：替换之前就失败（连接还活着），不该停用界面
+            window._handle_restore_failure(
+                RestoreFailed("备份文件损坏", conn_closed=False)
+            )
+            results["替换前失败不停用界面"] = not window._session_dead
+        finally:
+            mw.QMessageBox = real_box  # type: ignore[assignment]
+
     # 阶段串行的闸门。见 _guard 里的说明——阶段内部会 processEvents()，
     # 那会把**已经到期的定时器**一并派发，于是后一个阶段在前一个阶段内部重入。
     running = {"active": False, "done": set()}
-
     # 必须跑完的阶段清单，退出条件由它决定，不再靠「最后一个阶段自己 quit」。
     #
     # 原先 `import_check` 结尾直接 `app.quit()`。它一抢到闸门就退出进程，而排在
@@ -3944,6 +4036,7 @@ def main() -> int:
         tray_hotkey_check,
         collocation_check,
         surface_check,
+        p0_check,
         import_check,
     ]
 
@@ -4039,6 +4132,9 @@ def main() -> int:
     # 一个没有别的阶段在跑的时间窗（串行闸门能保证不并发，这里给的是足够晚
     # 的起点）。放在 import_check（36000 且会 quit）之前。
     QTimer.singleShot(25000, _guard(surface_check))
+    # P0 那几条断言排在这里：它要把界面临时置成「恢复失败后的停用态」再还回去，
+    # 必须独占一个没有别的阶段在跑的时间窗。
+    QTimer.singleShot(27000, _guard(p0_check))
     # 导入是最后一个阶段，它在结尾 app.quit()。串行闸门靠「60ms 一次」的重试排队，
     # 无法保证「14000ms 的 collocation 一定比更晚的 import 先拿到执行权」。一旦
     # import 抢先跑完并 quit，collocation 的 30 项观测就变成「未采集到」，而且偶发。

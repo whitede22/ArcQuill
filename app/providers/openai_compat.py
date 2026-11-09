@@ -204,24 +204,30 @@ class OpenAICompatProvider:
         """
         status = resp.status_code
         if status == 401:
-            raise NonRetryableError("API 鉴权失败（401），请检查密钥是否正确、是否已过期。")
+            raise NonRetryableError(
+                "API 鉴权失败（401），请检查密钥是否正确、是否已过期。", status=401
+            )
         if status == 404:
             raise NonRetryableError(
-                f"接口地址不存在（404）：{build_endpoint(self.base_url)}"
+                f"接口地址不存在（404）：{build_endpoint(self.base_url)}", status=404
             )
 
         detail = extract_error_message(resp.text)
         suffix = f"　服务端说明：{detail}" if detail else ""
 
         if status in DETERMINISTIC_STATUS_HINTS:
-            raise NonRetryableError(f"{DETERMINISTIC_STATUS_HINTS[status]}（{status}）。{suffix}")
+            raise NonRetryableError(
+                f"{DETERMINISTIC_STATUS_HINTS[status]}（{status}）。{suffix}", status=status
+            )
         if status == 429:
             # 限流是暂时性的，重试有意义
-            raise ProviderError(f"请求过于频繁（429），请稍后再试。{suffix}")
+            raise ProviderError(f"请求过于频繁（429），请稍后再试。{suffix}", status=429)
         if status >= 500:
-            raise ProviderError(f"服务端异常（{status}），已重试仍未成功。{suffix}")
+            raise ProviderError(
+                f"服务端异常（{status}），已重试仍未成功。{suffix}", status=status
+            )
         if status >= 400:
-            raise NonRetryableError(f"请求失败（{status}）。{suffix}")
+            raise NonRetryableError(f"请求失败（{status}）。{suffix}", status=status)
 
         if not require_choices:
             return ""

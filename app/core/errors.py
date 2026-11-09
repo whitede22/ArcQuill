@@ -51,6 +51,14 @@ def classify(exc: BaseException | None) -> str:
         if isinstance(exc, httpx.TransportError):
             return "network"
 
+    # provider 层把状态码翻译成中文文案后重新抛出的异常，状态码挂在 `status`
+    # 上（见 `providers/base.py`）。少了这一步，401 会落到下面 `_is_provider_error`
+    # 的 `bad_response`——「密钥错了」与「模型回了看不懂的东西」被记成同一类，
+    # 而这两件事的处理方式完全不同。
+    status = getattr(exc, "status", None)
+    if isinstance(status, int) and not isinstance(status, bool):
+        return _from_status(status)
+
     # TimeoutError 是 OSError 的子类，必须排在 disk 之前，否则超时会被记成磁盘错。
     if isinstance(exc, TimeoutError):
         return "timeout"

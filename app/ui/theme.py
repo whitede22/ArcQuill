@@ -614,6 +614,19 @@ QToolTip {
     padding: 4px 7px;
 }
 
+/* 查词结果那条「已保存至生词表」，浮在详情面板下沿。
+   底色必须是**实心** surface：它压着正文，半透明会让两行字叠在一起。这条规则
+   也是「深字压深底」第四处实例——不给底色时它取 QPalette::Window，系统开深色
+   模式就是深底配深字，而 QLabel 又已被上面那条 `QWidget { color: $text }` 接管。 */
+QLabel#toast {
+    background: $surface;
+    color: $text;
+    border: 1px solid $border;
+    border-radius: $radius_control;
+    padding: 7px 14px;
+    font-size: 12px;
+}
+
 /* 弹出菜单（托盘右键那两条：显示主窗口 / 退出）。
    这是「深字压深底」的第三处实例，出现得最隐蔽：`QMenu` 是 `QWidget` 的子类，
    上面那条 `QWidget { color: $text; }` 会把字色一起接管（浅色主题下是 #1F1F1E），

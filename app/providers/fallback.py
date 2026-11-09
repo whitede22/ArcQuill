@@ -17,12 +17,20 @@
 抛**原始**的接口错误，而不是「离线词库未收录」。前者指向用户真正需要处理的
 问题（密钥失效、地址写错、网络不通），后者只是说兜底也没碰上这个词——
 把它当结论抛出去，会把一个可修复的配置问题伪装成词库容量问题。
+
+## 哪些失败**不**兜底
+
+鉴权失败、地址不存在、模型名写错、参数被拒——这些都是确定性失败
+（`NonRetryableError`），重试与回落都不会让它们变好。兜底它们的结果是
+「查到了，来自本机离线词库」，而用户会读成「接口在工作」：密钥明明填错了，
+界面上却一切正常，直到某天发现同义语一直是空的才回头怀疑配置。
+所以这条路径直通报错，由界面把「去设置页检查密钥」说清楚。
 """
 
 from __future__ import annotations
 
 from ..core.models import Entry, Phrase
-from .base import DictionaryProvider, ProviderError
+from .base import DictionaryProvider, NonRetryableError, ProviderError
 
 
 class FallbackProvider:
@@ -38,6 +46,16 @@ class FallbackProvider:
     def lookup(self, word: str) -> Entry:
         try:
             return self.primary.lookup(word)
+        except NonRetryableError:
+            # **确定性失败不兜底。** 密钥填错、地址写错、模型名不存在，这几种
+            # 情况重试与回落都不会变好：兜底之后用户看到的是「查到了，来自本机
+            # 离线词库」，很容易理解成接口在正常工作，实际上接口一次都没通。
+            # 掩盖的代价是无限期的——直到他某天发现同义语一直空着才会回头怀疑
+            # 配置，而那时早已分不清是哪天坏的。
+            #
+            # 反过来，超时、断网、5xx、限流仍然兜底：这些不是用户当场能解决的
+            # 事，而「查不到词」会让他什么都做不了。
+            raise
         except ProviderError as exc:
             try:
                 entry = self.fallback.lookup(word)

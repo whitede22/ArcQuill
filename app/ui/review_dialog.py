@@ -22,12 +22,14 @@ from PySide6.QtWidgets import (
     QDialog,
     QHBoxLayout,
     QLabel,
+    QMessageBox,
     QPushButton,
     QVBoxLayout,
     QWidget,
 )
 
 from ..core import review
+from ..core.log import get_logger, log_exception
 from ..core.models import Entry
 from ..core.repository import Repository
 from .theme import stylesheet
@@ -320,7 +322,19 @@ class ReviewDialog(QDialog):
         entry = self.current_entry
         if entry is None or entry.id is None:
             return
-        self._repo.apply_review(entry.id, grade, self._now)
+        # 写不进去就**不能翻到下一张**：翻过去了等于告诉用户「这一张记下了」，
+        # 而它的复习间隔一格没动，下次还按老日期冒出来，用户会以为程序忘了。
+        # 停在原地并说明原因，至少这一次评分还有救。
+        try:
+            self._repo.apply_review(entry.id, grade, self._now)
+        except Exception as exc:  # noqa: BLE001 - 写库失败要说人话
+            log_exception(get_logger("ui.review"), "复习评分写入失败", exc)
+            QMessageBox.warning(
+                self,
+                "没能记下这次评分",
+                f"复习进度没有写进数据库，这一张停在原处。\n\n{exc}",
+            )
+            return
         self._graded += 1
         # 认不出的档位不记，也不新建键：统计的取值集合是固定的四档，
         # 多一个键写进报告就是多一个要归一化的脏值。

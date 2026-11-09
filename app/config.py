@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+from datetime import datetime
 from pathlib import Path
 
 from . import atomic
@@ -44,6 +45,8 @@ DB_PATH = APP_DIR / "arcquill.db"
 # 本地使用统计的数据库。**刻意与词库分开**：统计写失败、被锁、被用户删掉，
 # 都不该碰到生词本；反过来，备份或导出词库时也不会把统计数据一起带走。
 ANALYTICS_PATH = APP_DIR / "analytics.db"
+# 迁移留痕。旧目录现在保留不删，用户翻到时得有处可查它是怎么来的。
+MIGRATION_MARK = APP_DIR / "migrated_from.txt"
 
 # 旧数据目录与各自的数据库文件名（迁移用）。按「新 → 旧」排列：两代目录同时
 # 存在时优先搬最近的一代。它们只在这里定义一份，迁移逻辑与自检都从这取值，
@@ -122,10 +125,17 @@ DEFAULT_TIMEOUT = float(DEFAULT_CONFIG["timeout"])
 
 
 def _db_has_entries(path: Path) -> bool:
-    """只读打开数据库，确认里面真的有词条表。
+    """只读打开数据库，确认它不只是「有 entries 表」，而是**真的能用**。
 
-    比「文件存在且非空」严：复制中断留下半个文件时，前者照样返回真，用户会在
-    新目录里得到一个打不开的库，而旧目录已被删掉。
+    三级判据，每级都对应一种真实坏法：
+
+    1. 能只读打开 —— 复制中断留下的半个文件过不了这一关；
+    2. `PRAGMA integrity_check` 返回 ok —— 页级损坏过得了第 1 关，过不了这一关；
+    3. `entries` 表存在且至少一行 —— 建过表但一行没写进去的库（比如迁移途中
+       断电）看着一切正常，打开却是空的。
+
+    只判「有 entries 表」的版本放过了第 2、3 类：源库坏着，新库照样通过校验，
+    然后旧目录被删掉，用户两头空。这一步是**删除的前置条件**，宁可判严。
     """
     import sqlite3
 
@@ -134,18 +144,38 @@ def _db_has_entries(path: Path) -> bool:
     except sqlite3.Error:
         return False
     try:
+        if conn.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
+            return False
         row = conn.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='entries'"
         ).fetchone()
-        return row is not None
+        if row is None:
+            return False
+        total = conn.execute("SELECT COUNT(*) FROM entries").fetchone()[0]
+        return int(total) > 0
     except sqlite3.Error:
         return False
     finally:
         conn.close()
 
 
+def _write_migration_mark(source: Path) -> None:
+    """记下「这份数据是从哪搬来的」。
+
+    旧目录不再删除（见 `migrate_legacy_home`），用户翻到它时得有处可查——
+    一个没有说明的 `~/.quill` 只会被当成垃圾目录。
+    """
+    try:
+        MIGRATION_MARK.write_text(
+            f"来源：{source}\n时间：{datetime.now():%Y-%m-%d %H:%M:%S}\n",
+            encoding="utf-8",
+        )
+    except OSError:
+        pass  # 留痕失败不影响迁移本身
+
+
 def _migrate_from(source: Path, db_name: str) -> bool:
-    """把 `source` 整个搬到 APP_DIR。成功才删源目录。"""
+    """把 `source` 整个搬到 APP_DIR。成功返回 True，**但不删源目录**。"""
     try:
         APP_DIR.mkdir(parents=True, exist_ok=True)
         for item in source.iterdir():
@@ -167,9 +197,11 @@ def _migrate_from(source: Path, db_name: str) -> bool:
         # 而用户真正的词库还好端端躺在旧目录里——表现为「升级后词全没了」。
         DB_PATH.unlink(missing_ok=True)
         return False
-    # 校验通过再删。删失败不算迁移失败：数据已经在新目录里了，旧目录留着只是
-    # 多占一份空间，下次启动会因为 DB_PATH 已存在而直接跳过。
-    shutil.rmtree(source, ignore_errors=True)
+    # **不删旧目录。** 校验通过也不删：这一步是不可逆的，而它换来的只是
+    # 「少一个目录」。判据出错（假阳性）时用户两头空，代价与收益完全不成比例；
+    # 判据出错（假阴性）时最坏也只是下次启动再搬一遍，而那时 DB_PATH 已存在，
+    # 连搬都不会搬。所以留下它，写一行来源说明让用户知道那是什么。
+    _write_migration_mark(source)
     return True
 
 
@@ -177,12 +209,12 @@ def migrate_legacy_home() -> bool:
     """把旧版本的数据目录迁移到 ~/.arcquill。
 
     只在「用户没有通过环境变量指定数据目录」且新目录里还没有词库时执行。依次
-    尝试 ~/.quill（上一代）与 ~/.lexicon（更早），找到第一个存在的就搬，搬完
-    校验词条表，通过后删除旧目录。
+    尝试 ~/.quill（上一代）与 ~/.lexicon（更早），找到第一个存在的就搬。
 
-    **这一版起旧目录不再保留。** 前两代迁移都是复制完就停手，结果是用户目录里
-    一年后还躺着 ~/.lexicon；用户看到旧名字问「为什么还有这个」，比丢一次便利
-    更麻烦。代价是不可回退，因此校验放在了删除之前。
+    **旧目录保留，不删。** 前两版都是复制完就把旧目录删掉，理由是「用户看到
+    旧名字会以为程序乱了」。那个理由不值一次不可逆操作：迁移的判据再严也是
+    判据，判错一次用户就永远回不去。现在改成搬家后写一行 `migrated_from.txt`
+    说明来源与时间，用户翻到旧目录时能查到它是怎么来的。
 
     - 返回是否发生了迁移。
     - 失败返回 False 但不抛异常：数据还在旧目录，下次启动会再试。宁可少迁一次，
