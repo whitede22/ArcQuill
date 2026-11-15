@@ -50,15 +50,17 @@ Built for curious minds, deep readers, and anyone who wants to make every word c
 
 ### 🧠 Remember what you learn
 - Review saved vocabulary with spaced repetition.
+- Switch between vocabulary, review, and statistics from the top of the left column. Review and statistics open in the content area instead of a pop-up window.
 - Use a three-grade review system to track how well you remember words.
 - Words you mark as too easy leave the list; they stay in the archive and can be brought back at any time.
+- The statistics page lists total words, due today, mastered, and archived, and charts what you added over the last seven days.
 - Turn occasional lookups into a sustainable learning habit.
 
 ### 🛡️ Keep your workflow local
 - Use the local dictionary without requiring an AI service.
 - Back up and restore your vocabulary data using supported features.
 - Check for a new release once at startup, and only when one actually exists. The request reads a public endpoint and carries nothing about your machine.
-- After an upgrade, the first launch explains what changed. Click the version number in the lower right to read it again.
+- After an upgrade, the first launch explains what changed. Click the version number next to the wordmark at the top left to read it again.
 - Access optional usage statistics to better understand your learning and application performance.
 
 *Network access and data handling depend on the feature you use. See [Privacy and Data](#-privacy-and-data) for details.*
