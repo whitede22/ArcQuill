@@ -116,8 +116,10 @@ class MockProvider:
     """离线 Provider，仅用于演示与自检。"""
 
     name = "mock"
+    # 与离线词库同款：示例模式没有理解上下文的能力。
+    supports_context = False
 
-    def lookup(self, word: str) -> Entry:
+    def lookup(self, word: str, context: str = "") -> Entry:
         key = (word or "").strip().lower()
         data = _SAMPLES.get(key)
         if data is None:

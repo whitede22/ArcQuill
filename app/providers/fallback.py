@@ -42,9 +42,18 @@ class FallbackProvider:
         # 对外仍以主 Provider 自居：它才是用户选择的接入方式，兜底只是它的失败
         # 分支。真正的产出方写在词条的 source 上，由 DictionaryService 保留。
         self.name = primary.name
+        # 语境解释只有主 Provider 能给。这个属性必须照实转发，不能因为
+        # 「包装类自己也能接收 context 参数」就写 True：兜底产出的词条里
+        # 没有 contextual_meaning，而界面据此决定要不要提示「这个来源没有语境解释」。
+        self.supports_context = bool(getattr(primary, "supports_context", False))
 
-    def lookup(self, word: str) -> Entry:
+    def lookup(self, word: str, context: str = "") -> Entry:
         try:
+            # 只在真有上下文时才把第二个参数递出去：测试替身与第三方的
+            # provider 未必实现了它，无条件传会让「查一个词」直接 TypeError。
+            # 与 `DictionaryService.lookup` 的做法一致，两处判据同一份。
+            if context:
+                return self.primary.lookup(word, context=context)
             return self.primary.lookup(word)
         except NonRetryableError:
             # **确定性失败不兜底。** 密钥填错、地址写错、模型名不存在，这几种
@@ -58,6 +67,9 @@ class FallbackProvider:
             raise
         except ProviderError as exc:
             try:
+                # 兜底时不传 context：离线词库没有语境解释能力，传了也只会被忽略。
+                # 产出的词条 contextual_meaning 为空，用户看到的是「这次接口失败，
+                # 拿到的只有离线释义」，与界面那句兜底提示一致。
                 entry = self.fallback.lookup(word)
             except ProviderError:
                 # 兜底也没有这个词：把原始错误抛出去，它更有诊断价值

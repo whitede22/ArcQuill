@@ -81,6 +81,15 @@ class DictionaryService:
             entry.prompt_stale = self.is_stale(entry)
         return entry
 
+    def supports_context(self) -> bool:
+        """当前来源能不能按「用户贴的上下文」解释词义。
+
+        读 provider 上的类属性，不硬编码成「接口模式就行」：离线词库与示例
+        模式结构上都没有这个能力，而 `build_provider()` 在接口模式下没填密钥
+        时会静默退回离线——按配置判会把一个没有的能力说成有。
+        """
+        return bool(getattr(self.provider, "supports_context", False))
+
     # ---------- 对外接口 ----------
 
     def lookup(
@@ -88,13 +97,18 @@ class DictionaryService:
         word: str,
         use_cache: bool = True,
         *,
+        context: str = "",
         persist: bool = True,
         accept_fallback: bool = True,
     ) -> tuple[Entry, bool]:
         """返回 (词条, 是否来自缓存)。查词结果默认写入本地库。
 
-        两个关键字参数只为「批量重查」而存在，单条查词一律用默认值：
+        三个关键字参数各有各的来路：
 
+        - `context`：用户贴的一段话。**带了上下文就一定绕过缓存**——库里那条
+          是按通用词义生成的，`contextual_meaning` 是空的，命中缓存等于让用户
+          贴了句子却拿到一条与句子无关的解释。代价是同一个词带不同上下文查两次
+          会请求两次，那正是用户的意图。
         - `accept_fallback=False`：**不采纳**接口失败后由离线词库兜底产出的内容，
           改为抛 `ProviderError`（原因就是接口那次的失败原因）。单条重查时用户
           看得见状态栏那句「接口请求失败，已回落到离线词库」，他当场就能判断；
@@ -107,12 +121,25 @@ class DictionaryService:
         if not surface:
             raise ValueError("请输入要查询的单词")
 
-        if use_cache:
+        context = " ".join((context or "").split())
+        if context and not self.supports_context():
+            # 来源给不出语境解释。仍然查词（用户要的那个词还是要收进生词本），
+            # 只是不把上下文送进去——送了也没人读，而回填出来的空
+            # contextual_meaning 会让界面多一句「这次没有语境解释」的提示。
+            context = ""
+
+        if use_cache and not context:
             hit = self._from_cache(surface)
             if hit is not None:
                 return hit, True
 
-        entry = self.provider.lookup(surface)
+        # 只有带上下文时才把第二个参数传进去：测试替身与将来可能的第三方
+        # provider 未必实现了它，无条件传会让「查一个词」直接 TypeError。
+        entry = (
+            self.provider.lookup(surface, context=context)
+            if context
+            else self.provider.lookup(surface)
+        )
         entry.lemma = entry.lemma or surface
         # Provider 自带来源时以它为准——「接口失败后由离线词库兜底」产出的词条
         # 会带着自己的 source。无条件覆盖会把离线内容说成接口给的，
@@ -152,6 +179,12 @@ class DictionaryService:
 
         `accept_fallback=False` 供批量重查使用：接口这次没答上来的词条保持原样，
         而不是被兜底内容顶掉。
+
+        **刻意不带 context**：这里服务的是「同一条内容再要一次」，而上下文属于
+        那一次查词时的临时输入，界面上并没有「为这条词条记住当时贴的那段话」。
+        重查带不上上下文是诚实的——词条上的 `contextual_meaning` 会保持原值，
+        因为 `upsert` 会用新内容整条覆盖，而新内容里那一栏是空的。这一点由
+        详情面板的提示说明（见 `_add_context_note`）。
         """
         return self.lookup(
             word, use_cache=False, accept_fallback=accept_fallback

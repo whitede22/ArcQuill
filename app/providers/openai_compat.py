@@ -137,6 +137,9 @@ def extract_error_message(text: str, limit: int = 160) -> str:
 
 class OpenAICompatProvider:
     name = "openai-compat"
+    # 只有接口能写「这个词在你贴的这段话里指什么」——离线词库是词→释义的
+    # 静态语料，没有理解上下文的能力。界面据此决定要不要显示语境输入框。
+    supports_context = True
 
     def __init__(
         self,
@@ -152,8 +155,8 @@ class OpenAICompatProvider:
         self.timeout = float(timeout)
         self.max_retries = max(1, int(max_retries))
 
-    def _request(self, word: str) -> str:
-        return self._chat(SYSTEM_PROMPT, build_user_prompt(word))
+    def _request(self, word: str, context: str = "") -> str:
+        return self._chat(SYSTEM_PROMPT, build_user_prompt(word, context))
 
     def _request_phrase(self, phrase: str) -> str:
         return self._chat(PHRASE_SYSTEM_PROMPT, build_phrase_prompt(phrase))
@@ -277,11 +280,11 @@ class OpenAICompatProvider:
             return f"接口有响应，但结构不像 OpenAI 兼容（响应里没有 choices）"
         return f"连接正常 · {self.model}"
 
-    def lookup(self, word: str) -> Entry:
+    def lookup(self, word: str, context: str = "") -> Entry:
         last_error: Exception | None = None
         for attempt in range(self.max_retries):
             try:
-                content = self._request(word)
+                content = self._request(word, context)
                 entry = Entry.from_payload(extract_json(content))
                 if not entry.lemma:
                     entry.lemma = word

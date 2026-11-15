@@ -17,12 +17,91 @@ from .db import (
     strip_cjk,
     to_bigram,
 )
-from .models import Entry, Phrase, split_tags
+from .models import Entry, Phrase, split_pos, split_tags
+
+# 学习状态的筛选项。空串是「全部」，同时充当 `query_entries` 的默认值。
+#
+# 只给这三个分面，不按「已复习 / 学习中」再切：SM-2 的间隔是连续的，任何
+# 「学到哪一步」的细分都只是把同一个数字换几种说法，用户真正会问的是
+# 「今天要复习哪些」与「我背好了哪些」。
+STATE_ALL = ""
+STATE_DUE = "due"
+STATE_NEW = "new"
+STATE_MASTERED = "mastered"
+# 归档：复习时判过「太简单」，移出列表与复习队列，数据还在。
+# 它是**第四个分面**而不是另一个入口：用户找「我标过太简单的词」时，
+# 第一反应就是去状态下拉里翻，不会想到工具栏上另有一个按钮。
+STATE_ARCHIVED = "archived"
+
+STATE_LABELS: dict[str, str] = {
+    STATE_ALL: "全部状态",
+    STATE_DUE: "到期待复习",
+    STATE_NEW: "还没复习过",
+    STATE_MASTERED: "已掌握",
+    STATE_ARCHIVED: "已归档",
+}
+
+# 「已掌握」的判据：SM-2 推出来的下次间隔超过三周。这不是一个严格的阈值，
+# 而是 SM-2 自己的量级——初始间隔 1 天，每次乘 ease（2.5 起），大约四次「记住了」
+# 就跨过 21 天。写死在这里而不是放进配置：它描述的是「多长算记住」，不该由
+# 用户在设置里调，而调它的需求如果真出现，那时再加开关。
+MASTERED_INTERVAL = 21.0
+
+
+def _matches_state(
+    due: str, count: int, interval: float, state: str, now: str, archived: str = ""
+) -> bool:
+    """学习状态的**唯一判据**。词条与数据库行都走这里。
+
+    分成两个入口（`entry_matches_state` / `_row_matches_state`）却共用一份实现，
+    是因为两个消费方的数据形态不同（数据类 vs sqlite3.Row），而判据必须只有
+    一份：下拉里写「到期待复习 12」，点开却只有 9 条，用户会以为筛选坏了。
+
+    归档在判据**之前**分流：归档过的词不属于「待复习」「已掌握」中的任何一档，
+    它已经离开了学习循环。若只把它当第四档而不先从其余各档里排除，同一条词会
+    同时出现在「已掌握」和「已归档」里，而两者语义相反。
+    """
+    if state == STATE_ARCHIVED:
+        return bool(archived)
+    if archived:
+        return False
+    if state == STATE_DUE:
+        return bool(due) and due <= now
+    if state == STATE_NEW:
+        return int(count) == 0
+    if state == STATE_MASTERED:
+        return float(interval) >= MASTERED_INTERVAL
+    return True
+
+
+def entry_matches_state(entry: Entry, state: str, now: str) -> bool:
+    """该词条是否落在指定的学习状态下。`state` 为空表示全部（不含归档）。"""
+    return _matches_state(
+        entry.review_due,
+        entry.review_count,
+        entry.review_interval,
+        state,
+        now,
+        entry.archived_at,
+    )
+
+
+def _row_matches_state(row, state: str, now: str) -> bool:
+    return _matches_state(
+        row["review_due"] or "",
+        int(row["review_count"] or 0),
+        float(row["review_interval"] or 0.0),
+        state,
+        now,
+        row["archived_at"] or "",
+    )
 
 _COLUMNS = (
     "id, lemma, phonetic, pos, definition_en, definition_zh, example, example_zh, "
-    "synonyms_json, collocations_json, notes, tags, source, prompt_version, "
-    "created_at, updated_at, review_due, review_count, review_interval, review_ease"
+    "synonyms_json, collocations_json, contextual_meaning, usage_note, notes, tags, "
+    "source, prompt_version, "
+    "created_at, updated_at, review_due, review_count, review_interval, review_ease, "
+    "archived_at"
 )
 
 # JOINT 查询时 entries_fts 与 entries 存在同名列，必须全部加表前缀消歧义
@@ -71,7 +150,7 @@ _FTS_INSERT = (
 
 
 def _write_params(entry: Entry, now: str) -> tuple:
-    """UPDATE 与 INSERT 共用的参数，顺序与两条语句的前 14 个占位列一致。
+    """UPDATE 与 INSERT 共用的参数，顺序与两条语句的前 16 个占位列一致。
 
     两条语句的列序必须同步改：这里少一项或多一项，写进去的就不是错位而是
     sqlite3 的绑定数量异常，错误信息还落在调用行上，看不出是这里少写了一个。
@@ -86,6 +165,8 @@ def _write_params(entry: Entry, now: str) -> tuple:
         entry.example_zh,
         entry.synonyms_json(),
         entry.collocations_json(),
+        entry.contextual_meaning,
+        entry.usage_note,
         entry.notes,
         entry.tags,
         entry.source,
@@ -222,7 +303,8 @@ class Repository:
         是新内容」，不是「库里有没有这一行」。两者在读取-修改-写入场景下不同。
         """
         row = cur.execute(
-            "SELECT id, created_at, notes, tags FROM entries WHERE lemma = ?",
+            "SELECT id, created_at, notes, tags, contextual_meaning "
+            "FROM entries WHERE lemma = ?",
             (entry.lemma,),
         ).fetchone()
         if row and fresh_content:
@@ -230,20 +312,34 @@ class Repository:
             # 让界面渲染与索引同步都能看到「保留之后」的内容
             entry.notes = row["notes"] or ""
             entry.tags = row["tags"] or ""
+            # 语境解释是**上一次查词时贴过的上下文**派生出来的。重查路径不带
+            # 上下文（见 `DictionaryService.refresh`），新内容里这一栏必然是空的；
+            # 直接覆盖等于用户点了「重新查询」就弄丢了刚看到的语境义，而界面上
+            # 没有任何解释。所以「新内容没给」时保留旧值——换了上下文再查时
+            # 新值非空，照常覆盖，这条规则不会挡住真正的更新。
+            if not (entry.contextual_meaning or "").strip():
+                entry.contextual_meaning = row["contextual_meaning"] or ""
         return row
 
     def _update_row(
         self, cur, entry: Entry, row, params: tuple, now: str
     ) -> None:
-        """覆盖已有行。id 与 created_at 取自库，更新时间取本次。"""
+        """覆盖已有行。id 与 created_at 取自库，更新时间取本次。
+
+        `archived_at` 在这里被清空，等于「写入即复活」：用户重新查一个曾经判过
+        「太简单」的词，或者回去给它补一条备注，都是在说「我现在要这个词」。
+        让归档状态挡在这类操作前面，用户会看到「改完就消失了」，而界面上没有
+        任何地方解释它去了哪。
+        """
         entry.id = row["id"]
         entry.created_at = row["created_at"]
         entry.updated_at = now
         cur.execute(
             """UPDATE entries SET lemma=?, phonetic=?, pos=?, definition_en=?,
                definition_zh=?, example=?, example_zh=?, synonyms_json=?,
-               collocations_json=?, notes=?, tags=?, source=?, prompt_version=?,
-               updated_at=? WHERE id=?""",
+               collocations_json=?, contextual_meaning=?, usage_note=?,
+               notes=?, tags=?, source=?, prompt_version=?,
+               archived_at='', updated_at=? WHERE id=?""",
             params + (entry.id,),
         )
 
@@ -267,10 +363,11 @@ class Repository:
         cur.execute(
             """INSERT INTO entries
                (lemma, phonetic, pos, definition_en, definition_zh, example,
-                example_zh, synonyms_json, collocations_json, notes, tags, source,
+                example_zh, synonyms_json, collocations_json, contextual_meaning,
+                usage_note, notes, tags, source,
                 prompt_version, updated_at, created_at, review_due,
                 review_count, review_interval, review_ease)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             params
             + (
                 now,
@@ -360,27 +457,191 @@ class Repository:
         return [r["alias"] for r in rows]
 
     def count(self) -> int:
-        return int(self.conn.execute("SELECT COUNT(*) AS c FROM entries").fetchone()["c"])
+        """生词本条数。**不含归档**：归档的词已经离开生词本，把它算进来会让
+        「共 300 条」与列表里能数出来的条数对不上。"""
+        return int(
+            self.conn.execute(
+                "SELECT COUNT(*) AS c FROM entries WHERE archived_at = ''"
+            ).fetchone()["c"]
+        )
+
+    def count_archived(self) -> int:
+        return int(
+            self.conn.execute(
+                "SELECT COUNT(*) AS c FROM entries WHERE archived_at != ''"
+            ).fetchone()["c"]
+        )
 
     def all_ids(self) -> set[int]:
-        """全库词条 id 的快照。
+        """全库词条 id 的快照（**含归档**）。
 
         给批量导入用：区分「本次新增」与「本来就有」只能靠 id——`lookup()`
         返回的「是否命中缓存」说明不了这件事（别名命中 running → run 也是
         缓存命中，但那条词早就存在了）。导入前取一次快照，比每个词 import
         之前再查一遍库便宜得多，也不会被「同一个词在文件里出现两次」骗到。
+
+        归档的词必须算「本来就有」：表上 lemma 唯一，把它当新词去插会直接
+        撞唯一约束；而它在导入语义里确实存在，只是用户暂时不想复习。
         """
         return {int(r["id"]) for r in self.conn.execute("SELECT id FROM entries")}
 
     def list_entries(
-        self, order: str = "recent", limit: int | None = None, offset: int = 0
+        self,
+        order: str = "recent",
+        limit: int | None = None,
+        offset: int = 0,
+        archived: bool = False,
     ) -> list[Entry]:
-        sql = f"SELECT {_COLUMNS} FROM entries ORDER BY {ORDER_MAP.get(order, ORDER_MAP['recent'])}"
+        """列词条。`archived=False`（默认）只要生词本里的，True 只要归档的。
+
+        没有「两者都要」这一档：界面上「已归档」是独立的一个筛选态，
+        把两类混在同一屏里，用户分不清哪条还该复习。
+        """
+        sql = (
+            f"SELECT {_COLUMNS} FROM entries WHERE archived_at "
+            f"{'!=' if archived else '='} '' "
+            f"ORDER BY {ORDER_MAP.get(order, ORDER_MAP['recent'])}"
+        )
         params: tuple = ()
         if limit is not None:
             sql += " LIMIT ? OFFSET ?"
             params = (limit, offset)
         return [Entry.from_row(r) for r in self.conn.execute(sql, params)]
+
+    def entries_added_between(
+        self,
+        start: str = "",
+        end: str = "",
+        *,
+        archived: bool = False,
+        strict_start: bool = False,
+    ) -> list[Entry]:
+        """按**添加时间**取词条，空串表示该端不限。
+
+        `start` / `end` 是 `YYYY-MM-DD HH:MM:SS`，与 `created_at` 同一种格式。
+        比较走字符串字典序：格式定长且高位在前，字典序就是时间序。这是 SQLite
+        没有日期类型的直接后果，也是为什么配置里那个 `last_export_at` 必须
+        用 `_coerce_timestamp` 卡住格式——两边格式不一致时比较不会报错，只会
+        悄悄多给或少给一批词。
+
+        `end` 是闭区间：用户选「9 月 30 日」，指的是那一整天，所以调用方把
+        日期补成 `23:59:59` 再传进来，这里不猜。
+
+        `strict_start` 决定 `start` 是 `>=` 还是 `>`。「自上次导出以来」必须
+        用 `>`：上次导出那一刻创建的词已经在那份文件里了，`>=` 会把它再导一次，
+        而重复的卡片导进 Anki 之后要人工挑出来。
+        """
+        clauses = ["archived_at " + ("!= ''" if archived else "= ''")]
+        params: list[str] = []
+        if start:
+            clauses.append("created_at > ?" if strict_start else "created_at >= ?")
+            params.append(start)
+        if end:
+            clauses.append("created_at <= ?")
+            params.append(end)
+        sql = (
+            f"SELECT {_COLUMNS} FROM entries WHERE {' AND '.join(clauses)} "
+            "ORDER BY created_at ASC, id ASC"
+        )
+        return [Entry.from_row(r) for r in self.conn.execute(sql, tuple(params))]
+
+    def earliest_created(self) -> str:
+        """库里最早一条的添加时间，空库返回空串。用于日期区间的默认起点。"""
+        row = self.conn.execute(
+            "SELECT MIN(created_at) AS m FROM entries WHERE archived_at = ''"
+        ).fetchone()
+        return (row["m"] or "") if row else ""
+
+    # ---------- 筛选（学习状态 / 词性） ----------
+    #
+    # 「这一屏显示哪些词条」有四个独立条件：关键字、标签、学习状态、词性。
+    # 它们**全部在 Python 侧做**，不在 SQL 里拼条件，理由有两条：
+    #
+    #   1. 标签与词性是**多值字段**（`tags` 是空格分隔的一串、`pos` 可能是
+    #      "adj., n."）。SQL 只能子串匹配，而子串匹配一定会在「某个值包含
+    #      另一个」时出错：筛 `adj` 会把 `adv` 排除，筛 `考研` 会带出 `考研英语`。
+    #      判对错的那一半必须走 `split_tags` / `split_pos` 这两份唯一解析。
+    #   2. 四个条件互相叠加时，SQL 得按 2×2×2 组合拼语句；任何一个分支写错，
+    #      表现都是「列表空着但不报错」。
+    #
+    # 代价是全量读进内存。生词本是用户一个一个攒的，量级在千条以内，读一遍
+    # 几十毫秒；而界面只在「重载列表」时读一次，滚动加载用的是缓存好的结果
+    # （见 `MainWindow._ensure_visible_entries`）。
+
+    def query_entries(
+        self,
+        *,
+        order: str = "recent",
+        state: str = "",
+        pos: str = "",
+        tag: str = "",
+        keyword: str = "",
+        now: str = "",
+    ) -> list[Entry]:
+        """按四个条件过滤并排序，返回全量结果（分页由调用方切片）。
+
+        `now` 只用于「到期待复习」的判定，由调用方传入——仓储层不读时钟，
+        与 `due_count` / `due_entries` 一致，测试才好写。
+        """
+        query = (keyword or "").strip()
+        # 归档态是一个**互斥的视图**，不是叠加条件：选了「已归档」时列表只
+        # 出自归档池，其余状态同理。数据源先按这个分流，再走状态判据。
+        want_archived = state == STATE_ARCHIVED
+        if query:
+            # 走检索时保持 BM25 序：用户此刻要的是「最相关的那个」，而不是
+            # 「最近加的」。与旧行为一致。
+            entries = self.search(query, limit=None, archived=want_archived)
+        else:
+            entries = self.list_entries(
+                order=order, limit=None, archived=want_archived
+            )
+
+        if state:
+            entries = [e for e in entries if entry_matches_state(e, state, now)]
+        if pos:
+            entries = [e for e in entries if pos in split_pos(e.pos)]
+        if tag:
+            entries = [e for e in entries if tag in e.tag_list]
+        return entries
+
+    def state_counts(self, now: str) -> dict[str, int]:
+        """各学习状态下有多少条。用于下拉里的「待复习（12）」这种写法。
+
+        整表扫一遍在 Python 侧数，而不是四条 SQL：判据必须与 `query_entries`
+        用的是同一份（`entry_matches_state`），否则下拉写「12 条」而点开是 9 条，
+        用户会以为筛选坏了。
+        """
+        counts = {
+            STATE_ALL: 0,
+            STATE_DUE: 0,
+            STATE_NEW: 0,
+            STATE_MASTERED: 0,
+            STATE_ARCHIVED: 0,
+        }
+        for row in self.conn.execute(
+            "SELECT review_due, review_count, review_interval, archived_at "
+            "FROM entries"
+        ):
+            # 「全部状态」也走同一份判据，而不是无条件 +1：归档的词不属于
+            # 「全部」，否则下拉写「全部状态（20）」、点开只有 18 条。
+            for key in (STATE_ALL, STATE_DUE, STATE_NEW, STATE_MASTERED, STATE_ARCHIVED):
+                if _row_matches_state(row, key, now):
+                    counts[key] += 1
+        return counts
+
+    def pos_counts(self) -> list[tuple[str, int]]:
+        """全库词性及其词条数，按数量降序、同数量按名称升序。
+
+        与 `tag_counts` 同款：解析只走 `split_pos` 那一份实现，GROUP BY 会把
+        「adj., n.」当成一个整体。
+        """
+        counts: dict[str, int] = {}
+        for row in self.conn.execute(
+            "SELECT pos FROM entries WHERE archived_at = ''"
+        ):
+            for item in split_pos(row["pos"]):
+                counts[item] = counts.get(item, 0) + 1
+        return sorted(counts.items(), key=lambda item: (-item[1], item[0]))
 
     # ---------- 标签 ----------
 
@@ -395,7 +656,9 @@ class Repository:
         词条数决定降序：界面上用来筛选的标签，最常用的那个最该先看到。
         """
         counts: dict[str, int] = {}
-        for row in self.conn.execute("SELECT tags FROM entries"):
+        for row in self.conn.execute(
+            "SELECT tags FROM entries WHERE archived_at = ''"
+        ):
             for tag in split_tags(row["tags"]):
                 counts[tag] = counts.get(tag, 0) + 1
         return sorted(counts.items(), key=lambda item: (-item[1], item[0]))
@@ -432,23 +695,31 @@ class Repository:
             )
         return entries if limit is None else entries[:limit]
 
-    def search(self, query: str, limit: int | None = 300) -> list[Entry]:
+    def search(
+        self, query: str, limit: int | None = 300, *, archived: bool = False
+    ) -> list[Entry]:
         """中英双通道检索，FTS 不可用时回退 LIKE。
 
         `limit=None` 表示不设上限（导出路径使用）。列表需要上限是为了界面
         性能，但打印稿若沿用同一上限会被静默截断——文件头还自称「共 N 条」，
         而 N 恰好是被砍掉之后的数量，用户无从察觉。
+
+        `archived` 与 `list_entries` 同义：默认只在生词本范围内检索。这一点
+        必须显式写成参数而不是靠调用方事后过滤——FTS 分支带 LIMIT，过滤发生在
+        截断之后，会把「前 300 条里的归档词」滤掉一部分，剩下的不足 300 条，
+        而用户看不出这里少过东西。
         """
         query = (query or "").strip()
         if not query:
-            return self.list_entries(limit=limit)
+            return self.list_entries(limit=limit, archived=archived)
 
         expr = build_fts_query(query)
         if expr and has_fts(self.conn):
             try:
+                scope = "e.archived_at != ''" if archived else "e.archived_at = ''"
                 sql = f"""SELECT {_COLUMNS_E} FROM entries_fts f
                         JOIN entries e ON e.id = f.rowid
-                        WHERE entries_fts MATCH ?
+                        WHERE entries_fts MATCH ? AND {scope}
                         ORDER BY {_BM25}"""
                 params: tuple = (expr,)
                 if limit is not None:
@@ -463,10 +734,12 @@ class Repository:
         # 回退路径的字段覆盖必须与 FTS 一致，否则「索引一坏，检索能力静默退化」，
         # 这种退化极难被察觉，因此这里逐项对齐 notes / example / tags。
         like = f"%{query}%"
+        scope = "archived_at != ''" if archived else "archived_at = ''"
         sql = f"""SELECT {_COLUMNS} FROM entries
-                WHERE lemma LIKE ? OR definition_en LIKE ? OR definition_zh LIKE ?
+                WHERE ({scope}) AND (
+                    lemma LIKE ? OR definition_en LIKE ? OR definition_zh LIKE ?
                    OR example LIKE ? OR example_zh LIKE ? OR synonyms_json LIKE ?
-                   OR notes LIKE ? OR tags LIKE ?
+                   OR notes LIKE ? OR tags LIKE ?)
                 ORDER BY created_at DESC"""
         params = (like,) * 8 + (() if limit is None else (limit,))
         if limit is not None:
@@ -605,11 +878,11 @@ class Repository:
     # ---------- 间隔重复复习 ----------
 
     def due_count(self, now: str) -> int:
-        """到期待复习的条数（`review_due` 非空且不晚于 now）。"""
+        """到期待复习的条数（`review_due` 非空且不晚于 now）。不含归档。"""
         return int(
             self.conn.execute(
                 "SELECT COUNT(*) AS c FROM entries "
-                "WHERE review_due != '' AND review_due <= ?",
+                "WHERE archived_at = '' AND review_due != '' AND review_due <= ?",
                 (now,),
             ).fetchone()["c"]
         )
@@ -622,7 +895,7 @@ class Repository:
         """
         sql = (
             f"SELECT {_COLUMNS} FROM entries "
-            "WHERE review_due != '' AND review_due <= ? "
+            "WHERE archived_at = '' AND review_due != '' AND review_due <= ? "
             "ORDER BY review_due ASC, id ASC"
         )
         params: tuple = (now,)
@@ -646,11 +919,16 @@ class Repository:
         from .review import due_timestamp, format_timestamp, sm2
 
         row = self.conn.execute(
-            "SELECT review_ease, review_interval, review_count "
+            "SELECT review_ease, review_interval, review_count, archived_at "
             "FROM entries WHERE id = ?",
             (entry_id,),
         ).fetchone()
         if row is None:
+            return
+        if row["archived_at"]:
+            # 归档的词已经离开学习循环。给它推进间隔没有任何可见效果
+            # （它不在列表也不在队列里），只会让日后放回来时带着一个
+            # 谁也算不清的到期日。
             return
         ease, interval, count = sm2(
             float(row["review_ease"] or 2.5),
@@ -671,3 +949,54 @@ class Repository:
             self.conn.rollback()
             raise
         self.conn.commit()
+
+    def archive(self, entry_id: int, now: datetime) -> bool:
+        """把词条移出生词本（复习里判「太简单」）。返回是否真的改到了行。
+
+        同时清空 `review_due`：三重过滤是有意的。`due_count` / `due_entries`
+        已经排除了归档行，但复习队列、待复习角标、自检的到期判据各有各的入口，
+        任何一处将来漏了 `archived_at` 条件，归档的词就会重新冒出来——而它
+        最不该做的就是重新冒出来。把 `review_due` 一并清掉，那个漏网的查询
+        也查不到它。
+
+        `WHERE archived_at = ''` 让重复归档返回 False，而不是把时间戳刷新一遍：
+        调用方靠这个返回值判断「这一下真的改变状态了吗」。
+        """
+        from .review import format_timestamp
+
+        stamp = format_timestamp(now)
+        try:
+            cur = self.conn.execute(
+                "UPDATE entries SET archived_at = ?, review_due = '', updated_at = ? "
+                "WHERE id = ? AND archived_at = ''",
+                (stamp, stamp, entry_id),
+            )
+        except Exception:
+            self.conn.rollback()
+            raise
+        self.conn.commit()
+        return cur.rowcount > 0
+
+    def unarchive(self, entry_id: int, now: datetime) -> bool:
+        """把归档的词放回生词本，并重新排进复习队列（立即到期）。
+
+        `review_interval` 清零、`review_ease` 与 `review_count` 保留：
+        放回来意味着「我又想学了」，那就从短间隔重新爬；而清除 ease 等于
+        忘掉这个词以前有多难，清除 count 等于假装从没学过，两者都会让
+        下次评分给出一个不合适的间隔。
+        """
+        from .review import format_timestamp
+
+        stamp = format_timestamp(now)
+        try:
+            cur = self.conn.execute(
+                "UPDATE entries SET archived_at = '', review_due = ?, "
+                "review_interval = 0, updated_at = ? "
+                "WHERE id = ? AND archived_at != ''",
+                (stamp, stamp, entry_id),
+            )
+        except Exception:
+            self.conn.rollback()
+            raise
+        self.conn.commit()
+        return cur.rowcount > 0

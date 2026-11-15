@@ -9,7 +9,7 @@ from pathlib import Path
 
 from .models import Entry
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 7
 
 # 词条由哪一版提示词生成。列名单独命名为常量，是因为它同时被三处引用：
 # DDL、补列迁移、以及 selfcheck 里「旧库补列」的取证脚本——各写一份字符串
@@ -31,6 +31,20 @@ ENTRIES_ADDED_COLUMNS: dict[str, str] = {
     "review_count": "INTEGER NOT NULL DEFAULT 0",
     "review_interval": "REAL NOT NULL DEFAULT 0",
     "review_ease": "REAL NOT NULL DEFAULT 2.5",
+    # 语境中的含义：用户查词时贴了一段上下文，模型按那段上下文给出这一处的
+    # 具体含义。没有上下文时恒为空串——它不是「更详细的释义」，而是「在这个
+    # 句子里它指什么」，两者混不得。所以空值就是「这次没提供语境」，不是缺项。
+    "contextual_meaning": "TEXT NOT NULL DEFAULT ''",
+    # 使用注意：语域、常用句型、易错点（例如「多用于否定句」「书面语」）。
+    # 与 `notes` 的区别是作者：这一列由模型写，`notes` 由用户写，互不覆盖。
+    "usage_note": "TEXT NOT NULL DEFAULT ''",
+    # 归档时间。空串表示还在生词本里；非空表示用户复习时判过「太简单」，
+    # 这个词移出列表与复习队列，但数据保留，可以放回来。
+    #
+    # **不用删除实现这件事**：删了就没了，而「太简单」是在复习流程里连点
+    # 四次的第四下——手滑的代价不该是不可恢复。归档同时保住了导出与统计的
+    # 口径：删掉的词会从「历史学过多少」里也一起消失。
+    "archived_at": "TEXT NOT NULL DEFAULT ''",
 }
 
 # 补列之前，所有词条都由「当时唯一存在过的那一版提示词」生成。
@@ -116,10 +130,13 @@ CREATE TABLE IF NOT EXISTS entries (
     example_zh    TEXT NOT NULL DEFAULT '',
     synonyms_json TEXT NOT NULL DEFAULT '[]',
     collocations_json TEXT NOT NULL DEFAULT '[]',
+    contextual_meaning TEXT NOT NULL DEFAULT '',
+    usage_note    TEXT NOT NULL DEFAULT '',
     review_due    TEXT NOT NULL DEFAULT '',
     review_count  INTEGER NOT NULL DEFAULT 0,
     review_interval REAL NOT NULL DEFAULT 0,
     review_ease   REAL NOT NULL DEFAULT 2.5,
+    archived_at   TEXT NOT NULL DEFAULT '',
     notes         TEXT NOT NULL DEFAULT '',
     tags          TEXT NOT NULL DEFAULT '',
     source        TEXT NOT NULL DEFAULT '',

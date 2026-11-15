@@ -56,6 +56,7 @@ from PySide6.QtCore import QEventLoop, QMimeData, QPointF, QRect, QSize, Qt, QTi
 from PySide6.QtGui import QColor, QDropEvent, QImage, QPainter, QPalette  # noqa: E402
 from PySide6.QtWidgets import (  # noqa: E402
     QApplication,
+    QCheckBox,
     QDialog,
     QLabel,
     QProgressDialog,
@@ -347,8 +348,39 @@ EXPECT: dict = {
     "按字母排序首行": "ephemeral",
     "按最早排序首行": "ubiquitous",
     "导出数据源条数": 3,
-    "列表受显示上限约束": 2,
-    "导出不受显示上限约束": 3,
+    # v1.5 起列表不再有硬上限。「列表与导出同源」这一条现在比的是**同一个数**
+    # ——旧版这里靠 `unlimited=True` 分叉，而分叉本身就是那条上限存在的证据。
+    "列表与导出同源": 3,
+    "首屏只画一页": True,
+    "补页后画满": True,
+    "计数标签标出未画完": lambda v: isinstance(v, str) and "已显示" in v,
+    "不筛选时计数标签不啰嗦": lambda v: isinstance(v, str) and "匹配" not in v,
+    # v1.5 的五个新入口
+    "示例来源不给语境入口": True,
+    "接口来源给出语境入口": True,
+    "语境框内容会被带去查词": "The charges against him were dropped.",
+    "收起语境时不带上下文": True,
+    "学习状态下拉五项": 5,
+    "状态筛选接在查询上": ["filtermastered"],
+    "未复习筛选接在查询上": lambda v: isinstance(v, list)
+    and "filternew" in v
+    and "filterdue" not in v,
+    "词性下拉按库里的词性生成": lambda v: isinstance(v, list) and "adj" in v,
+    "已归档筛选取到归档词": ["archivedprobe"],
+    "归档词条给恢复按钮": lambda v: "放回生词本" in v,
+    "恢复后回到生词本": True,
+    "恢复后不再计入归档数": 0,
+    "有语音包时词条上挂朗读": 1,
+    "无语音包时不留灰按钮": 0,
+    "更新入口默认不占位": True,
+    "发现新版本挂出可点入口": True,
+    "写盘逻辑不占 UI 线程": True,
+    "导出失败转成可读值": lambda v: isinstance(v, tuple) and v[0] == "io",
+    "引导页的「带我查第一个词」会进入实操": True,
+    "引导第 1 步写进状态栏": lambda v: isinstance(v, str) and "第 1 步" in v,
+    "引导第 2 步写进状态栏": lambda v: isinstance(v, str) and "第 2 步" in v,
+    "没评分时不推进引导": 2,
+    "评过分后引导收尾": (0, True),
     "非法配置被拦下": True,
     "非法配置提示": lambda v: isinstance(v, str) and len(v) > 0,
     "提示对用户可见": True,
@@ -678,12 +710,27 @@ EXPECT: dict = {
     # 默认必须是最通用的纯文本，而不是最花哨的那个
     "导出默认格式": "text",
     # 列表有显示上限，导出默认跟随它会让打印稿少一截而用户看不出来
-    "导出默认不受上限约束": True,
+    "导出不再有上限选项": True,
     # 没有筛选时该选项必须置灰。「能勾但不起作用」等同虚假选项
     "无筛选时范围选项置灰": True,
     "有筛选时范围选项可用": True,
     # 「选哪个」是这屏唯一要回答的问题，只给格式名等于把问题丢回给用户
     "导出每项都有用途说明": True,
+    "默认范围是全部": "all",
+    # 没有「上次导出」时增量档必须置灰，否则用户勾了它、以为导的是增量，
+    # 实际拿到整份，而两份文件看起来一样
+    "无上次导出时增量档置灰": True,
+    "未选日期区间时日期禁用": True,
+    "勾了日期区间才可改日期": True,
+    "日期区间取到默认起点": lambda v: isinstance(v, str) and len(v) == 10,
+    "有上次导出时增量档可用": True,
+    "增量档文案带上上次时间": lambda v: "2026-11-01 10:00" in v,
+    "日期起点取库里最早一条": "2026-09-01",
+    # 「全部」要真的绕开搜索框；跟着筛选走时，对话框上那个全库数字就是假的
+    "全部范围绕过筛选": True,
+    "日期区间含当天": True,
+    "日期区间外取不到词": True,
+    "增量范围取到上次之后的词": True,
     "格式说明可打开": True,
     "格式说明样例齐全": True,
     # 样例必须来自真实导出函数。这两条是**可验证的**证据：BOM 与格式标识
@@ -927,6 +974,39 @@ EXPECT: dict = {
     "欢迎弹窗被触发": True,
     "版本号已写回": True,
     "版本已最新不再弹": True,
+    # 更新说明（welcome_check 的 ②③④）。
+    "升级时多一页更新说明": 4,
+    "升级时停在更新页": True,
+    "更新页有不再提示的勾选框": 1,
+    "勾选后记下不再提示": True,
+    # 首装不该看到更新说明：他没有「上一次」，讲变化对他没有意义。
+    "首装没有更新页": 3,
+    "首装没有勾选框": 0,
+    "首装不提示更新": 0,
+    # 从 1.0.0 升上来有十几个版本，欢迎页只摊前三个。
+    "升级后提示的版本数": 3,
+    "勾过不再提示更新": 0,
+    "顶栏版本号徽章": lambda v: isinstance(v, str) and v.startswith("v"),
+    "版本号已不在状态栏": lambda v: v is True,
+    "左栏三个分页": lambda v: v == ["生词本", "复习", "统计"],
+    "统计页已切换": lambda v: v is True,
+    "统计页隐藏了列表": lambda v: v is True,
+    "统计页四张卡都有数": lambda v: v is True,
+    "七日图有七列": lambda v: v == 7,
+    "复习页已切换": lambda v: v is True,
+    "复习页是内嵌的": lambda v: v is True,
+    "复习页退出按钮文案": lambda v: v == "返回生词本",
+    "返回后复习页已销毁": lambda v: v is True,
+    "返回后分段回到生词本": lambda v: v is True,
+    "分段互斥": lambda v: v is True,
+    "版本号提示是更新日志": lambda v: "更新日志" in v,
+    # 条数不写死：每发一版都会多一条，写死等于给自己埋一处必须记得改的断言。
+    "更新日志对话框条目数": lambda v: isinstance(v, int) and v >= 10,
+    "更新日志覆盖全部版本": True,
+    # 竖线（accent_check）。样式表里写着不算数，控件树里有这一根才算。
+    "语境解释左侧有竖线": 1,
+    "竖线宽两个像素": 2,
+    "竖线旁边仍是语境标签": True,
     # 统计告知页（analytics_check）。两条硬边界：看过说明不等于同意；
     # 关掉窗口既不是同意也不是拒绝（下次还会问）。
     "告知页标题": "帮助我们改进 ArcQuill",
@@ -955,7 +1035,11 @@ EXPECT: dict = {
     "复习会话正面先看词不翻面": True,
     "复习会话翻面后给四档评分": lambda v: v == ["忘了", "模糊", "记住了", "太简单"],
     "复习评分推进了记忆状态": True,
-    "四档评分各自计数": True,
+    "三档评分各自计数": True,
+    "太简单移出生词本": True,
+    "太简单不计入评分分布": True,
+    "太简单单独计数": True,
+    "归档的词不再进复习队列": True,
     "复习会话评完推进或结束": True,
     # 容器底色（详情区面板 / 对话框）必须由主题给。系统开深色模式时，没有
     # 背景规则的容器会漏出系统色，与主题给的文字色撞成「深字压深底」。
@@ -977,6 +1061,12 @@ def main() -> int:
     from app.ui.onboarding import CURRENT_ONBOARD_VERSION
 
     config["onboard_version"] = CURRENT_ONBOARD_VERSION
+    # 同理，把「上次运行的版本」标成当前版本。否则 v1.7 起会判定成「刚从旧版
+    # 升上来」，启动时第一屏换成更新说明，同样是一个阻塞主流程的模态框。
+    from app.version import APP_VERSION as _APP_VERSION
+
+    config["last_seen_version"] = _APP_VERSION
+    config["skip_update_note"] = False
     # 统计告知页同理：它也是模态框，未表态时每次启动都会弹。主流程标记为已表态，
     # 告知页本身另有场景单独测（见 analytics_check）。
     config["analytics_consent_decided"] = True
@@ -1187,22 +1277,227 @@ def main() -> int:
         window.order.setCurrentIndex(0)  # 最近
         window._reload_list()
 
-        # 导出与列表共用数据源
+        # 导出与列表共用数据源：所见即所导
         results["导出数据源条数"] = len(window._current_entries())
+        results["列表与导出同源"] = len(window._current_entries(unlimited=True))
 
-        # 但上限不共用：列表可被显示上限截断，导出必须完整。
-        # 把上限临时压到 2 来验证——否则要造 1000+ 条才能碰到边界。
+        # v1.5 的按需加载：列表只把要显示的那几行变成控件，剩下的等滚动再画。
+        # 这里直接对渲染层下手——把每页压到 1 条，看「只画一页」和「补页能补齐」
+        # 是不是真的成立。旧版那条 `LIST_LIMIT = 2` 的断言验的是相反的语义
+        # （超过上限就永远看不见），留着它会把回归当成通过。
         import app.ui.main_window as mw
 
-        saved_limit = mw.LIST_LIMIT
-        mw.LIST_LIMIT = 2
+        total = len(window._current_entries())
+        saved_page = mw.LIST_PAGE
+        mw.LIST_PAGE = 1
         try:
-            results["列表受显示上限约束"] = len(window._current_entries())
-            results["导出不受显示上限约束"] = len(
-                window._current_entries(unlimited=True)
-            )
+            window.list.clear()
+            window._rendered = 0
+            added = window._append_rows(1)
+            results["首屏只画一页"] = added == 1 and window._rendered == 1
+            window._update_count_label()
+            results["计数标签标出未画完"] = window.count_label.text()
+            window._append_rows(10_000)
+            results["补页后画满"] = window._rendered == total
         finally:
-            mw.LIST_LIMIT = saved_limit
+            mw.LIST_PAGE = saved_page
+            window._reload_list()
+
+        # 画完了就不该再挂「已显示 N 条」——那句话会让人以为还有更多没显示，
+        # 旧版「已显示 1000 条 · 请用搜索缩小范围」给人的就是这种错觉。
+        results["不筛选时计数标签不啰嗦"] = window.count_label.text()
+
+        # ---- v1.5 的五个新入口：语境、筛选、朗读、更新、导出线程化 ----
+        #
+        # 这五件事有同一个失效形态：**接上了，但只在某种来源 / 某种系统下才通**。
+        # 语境只有接口模式能用、朗读只有装了语音包的机器能用、更新只有真发新版
+        # 才会出现——日常跑一轮什么都看不到，所以必须在这里把那条分支按住跑一遍。
+
+        # 语境入口按来源能力出现。示例模式（mock）给不出「这段话里指什么」，
+        # 让用户贴一段话再拿到一条无关的释义，比没有这个入口更糟。
+        results["示例来源不给语境入口"] = not window.btn_context.isVisible()
+
+        class _CtxCapable:
+            """只把 supports_context 掰成 True，其余原样转发。"""
+
+            def __init__(self, inner):
+                self._inner = inner
+
+            def supports_context(self):
+                return True
+
+            def __getattr__(self, name):
+                return getattr(self._inner, name)
+
+        real_service = window.service
+        window.service = _CtxCapable(real_service)
+        try:
+            window._sync_context_available()
+            results["接口来源给出语境入口"] = window.btn_context.isVisible()
+            window._on_context_toggled(True)
+            window.context_edit.setPlainText("  The charges against him were dropped.  ")
+            # 两端空白要抹掉：用户复制一段话时几乎一定带着缩进与换行，
+            # 原样送进提示词只是让 token 里多一截空气。
+            results["语境框内容会被带去查词"] = window._current_context()
+            window._on_context_toggled(False)
+            results["收起语境时不带上下文"] = window._current_context() == ""
+        finally:
+            window.service = real_service
+            window._sync_context_available()
+
+        # 两个筛选下拉必须真的接在查询上。只验「下拉里有几项」的话，把
+        # `currentIndexChanged` 的 connect 删掉也照样通过——而那种情况下
+        # 用户选了什么都不会发生。
+        #
+        # 用两条临时词条来验：到这一步库里可能已经被前面的场景删空了，
+        # 拿「现存的词条数有没有变少」当判据会得到一条永远成立的断言。
+        from app.core.models import Entry as _Entry
+        from app.core.repository import STATE_ARCHIVED as _STATE_ARCHIVED
+        from app.core.repository import STATE_MASTERED as _STATE_MASTERED
+        from app.core.repository import STATE_NEW as _STATE_NEW
+
+        # 判据用「已掌握」而不是「到期待复习」：新词条入库时 `review_due` 被
+        # 播种成 now（收藏的下一步就是复习），所以**每一条新词都在到期集合里**
+        # ——拿它做判据会得到一条永远成立的断言。
+        repo.upsert(
+            _Entry(
+                lemma="filtermastered",
+                definition_zh="记牢了",
+                review_count=3,
+                review_interval=30.0,
+            )
+        )
+        repo.upsert(
+            _Entry(
+                lemma="filterdue",
+                definition_zh="到期",
+                review_due="2000-01-01 00:00:00",
+                review_count=1,
+            )
+        )
+        repo.upsert(_Entry(lemma="filternew", definition_zh="没复习过"))
+        window._reload_list()
+
+        results["学习状态下拉五项"] = window.state_filter.count()
+        window.state_filter.setCurrentIndex(
+            window.state_filter.findData(_STATE_MASTERED)
+        )
+        results["状态筛选接在查询上"] = [e.lemma for e in window._visible_entries]
+        window.state_filter.setCurrentIndex(window.state_filter.findData(_STATE_NEW))
+        results["未复习筛选接在查询上"] = [e.lemma for e in window._visible_entries]
+        window.state_filter.setCurrentIndex(0)
+
+        results["词性下拉按库里的词性生成"] = [
+            window.pos_filter.itemData(i) for i in range(window.pos_filter.count())
+        ]
+
+        # 「已归档」是第四个分面。三处必须一起验：筛选能取到、详情区给出
+        # 恢复入口、恢复之后词真的回生词本。只验第一条的话，恢复按钮那条
+        # 路径断了也照样绿——而用户看得见的恰恰是那个按钮。
+        from datetime import datetime as _dt
+
+        from PySide6.QtWidgets import QPushButton as _ProbeButton
+
+        repo.upsert(_Entry(lemma="archivedprobe", definition_zh="归档样本"))
+        probe = repo.get("archivedprobe")
+        repo.archive(probe.id, _dt.now())
+        window._refresh_state_filter()
+        window.state_filter.setCurrentIndex(
+            window.state_filter.findData(_STATE_ARCHIVED)
+        )
+        results["已归档筛选取到归档词"] = [e.lemma for e in window._visible_entries]
+        window.detail.show_entry(repo.get("archivedprobe"))
+        results["归档词条给恢复按钮"] = [
+            button.text() for button in window.detail.findChildren(_ProbeButton)
+        ]
+        window._do_restore(int(probe.id))
+        restored = repo.get("archivedprobe")
+        results["恢复后回到生词本"] = bool(restored and not restored.archived_at)
+        results["恢复后不再计入归档数"] = repo.count_archived()
+
+        window.state_filter.setCurrentIndex(0)
+
+        # 收掉临时词条：后面还有场景要按「原本有几条」来判断
+        for _lemma in ("filtermastered", "filterdue", "filternew", "archivedprobe"):
+            _probe = repo.get(_lemma)
+            if _probe is not None and _probe.id is not None:
+                repo.delete(_probe.id)
+        window._reload_list()
+
+        # 朗读按钮只在系统真有语音包时出现。没有语音包却留一个点不动的灰块，
+        # 是「看起来能用其实不能用」的典型。
+        from PySide6.QtWidgets import QPushButton as _QPushButton
+
+        def speak_buttons() -> int:
+            body = window.detail.scroll.widget()
+            if body is None:
+                return 0
+            return sum(
+                1
+                for button in body.findChildren(_QPushButton)
+                if button.property("role") == "speak"
+            )
+
+        window.detail.set_speech(True)
+        window.detail.show_entry(repo.get("ubiquitous"))
+        results["有语音包时词条上挂朗读"] = speak_buttons()
+        window.detail.set_speech(False)
+        window.detail.show_entry(repo.get("ubiquitous"))
+        results["无语音包时不留灰按钮"] = speak_buttons()
+
+        # 更新入口：默认不占位，发现新版本才挂出来。
+        results["更新入口默认不占位"] = window.update_label.isHidden()
+        from app.core.update import ReleaseInfo as _ReleaseInfo
+
+        window._on_update_found(
+            _ReleaseInfo(version="9.9.9", url="https://example.com/release")
+        )
+        results["发现新版本挂出可点入口"] = (
+            window.update_label.isVisible()
+            and "9.9.9" in window.update_label.text()
+        )
+        # 复位：这条入口是「真发了新版」的产物，不该留在本轮其余场景里
+        window.update_label.setVisible(False)
+        window.update_label.setText("")
+        window._update_info = None
+
+        # 导出离开 UI 线程：写盘逻辑必须是静态的（不碰任何界面对象才能跨线程），
+        # 且 worker 把异常转成值——worker 的失败回调只传得回一句话，类型信息
+        # 在跨线程那一刻就丢了，主线程没法分派三种不同的说法。
+        import inspect as _inspect
+
+        results["写盘逻辑不占 UI 线程"] = isinstance(
+            _inspect.getattr_static(mw.MainWindow, "_write_export"), staticmethod
+        )
+        results["导出失败转成可读值"] = window._worker_export(
+            "markdown", [], "", Path(_GUI_HOME) / "no" / "such" / "x.md"
+        )
+
+        # 首启引导的「跟着做一遍」。三步全靠**已经发生的事**推进，不做假交互，
+        # 所以这里也只有真跑一遍才验得到：状态栏该说第几步、没评分时不能自己
+        # 往下走、评完分要收尾。只验文案的话，一个永远停在第一步的引导照样过。
+        from app.ui.onboarding import OnboardingDialog as _OnboardingDialog
+
+        _ob = _OnboardingDialog(window.config.get("theme", "ink"), parent=None)
+        _ob._start_practice()
+        results["引导页的「带我查第一个词」会进入实操"] = (
+            _ob.practice and _ob.result() == QDialog.DialogCode.Accepted
+        )
+        _ob.deleteLater()
+
+        window._practice_step = 0
+        window._start_practice()
+        results["引导第 1 步写进状态栏"] = window.statusBar().currentMessage()
+        window._practice_after_lookup()
+        results["引导第 2 步写进状态栏"] = window.statusBar().currentMessage()
+        # 没评分就不该推进：跳过一次评分还往下走，等于教用户「这一步可以糊弄」
+        window._practice_after_review(0)
+        results["没评分时不推进引导"] = window._practice_step
+        window._practice_after_review(1)
+        results["评过分后引导收尾"] = (
+            window._practice_step,
+            "引导做完了" in window.statusBar().currentMessage(),
+        )
 
         # 设置对话框必须挡住非法输入：否则填错的地址要等到下次查词失败才
         # 暴露，那时用户早已忘了自己改过设置
@@ -1855,7 +2150,10 @@ def main() -> int:
             results["导出对话框选项数"] = len(dlg._buttons)
             results["导出对话框条目数"] = [k for k, _l, _h, _e in EXPORT_FORMATS]
             results["导出默认格式"] = dlg.format_key
-            results["导出默认不受上限约束"] = dlg.unlimited
+            # v1.5 起列表没有硬上限，导出侧那个「解除上限」的勾选框也随之消失。
+            # 留着一个永远无意义的选项，比没有更让人困惑；这条断言守的就是
+            # 「别把它加回来」。
+            results["导出不再有上限选项"] = not hasattr(dlg, "unlimited")
             # 没有筛选时「跟随当前筛选」必须置灰：可勾选却不起作用是虚假选项
             results["无筛选时范围选项置灰"] = not dlg.scope_limited.isEnabled()
             # 每一项都必须带用途说明——「选哪个」是这屏唯一要回答的问题，
@@ -1864,8 +2162,78 @@ def main() -> int:
                 dlg._buttons[k].toolTip() for k, _l, _h, _e in EXPORT_FORMATS
             ]
             results["导出每项都有用途说明"] = all(bool(h) for h in hints)
+            results["默认范围是全部"] = dlg.scope_key
+            # 没有「上次导出」时增量档必须置灰：让它可点，用户会以为导的是
+            # 增量，实际拿到整份，而两份文件长得一模一样。
+            results["无上次导出时增量档置灰"] = not dlg.scope_since.isEnabled()
+            # 日期区间同理：没勾就此禁用，勾了才让改
+            results["未选日期区间时日期禁用"] = not dlg.date_from.isEnabled()
+            dlg.scope_range.setChecked(True)
+            results["勾了日期区间才可改日期"] = dlg.date_from.isEnabled()
+            results["日期区间取到默认起点"] = dlg.date_from_text
         finally:
             dlg.deleteLater()
+
+        with_since = ExportDialog(
+            total=1,
+            filtered=True,
+            last_export_at="2026-11-01 10:00:00",
+            earliest="2026-09-01 08:00:00",
+            parent=window,
+        )
+        try:
+            results["有上次导出时增量档可用"] = with_since.scope_since.isEnabled()
+            results["增量档文案带上上次时间"] = with_since.scope_since.text()
+            results["日期起点取库里最早一条"] = with_since.date_from_text
+        finally:
+            with_since.deleteLater()
+
+        # 范围取数：「全部」必须绕开搜索框。早先它与「跟随当前筛选」共用
+        # `_current_entries`，搜索框里留着上次的关键字时，选「全部（200 条）」
+        # 只会导出 3 条，而对话框上的数字写着 200——那个数字是 `repo.count()`，
+        # 本来就是全库口径，两边不一致本身就是证据。
+        class _Scope:
+            scope_key = "all"
+            filtered_only = False
+            date_from_text = ""
+            date_to_text = ""
+
+        window.filter.setText("ubiquitous")
+        window._reload_list()
+        narrowed = len(window._current_entries())
+        everything = len(window._collect_export_entries(_Scope(), ""))
+        results["全部范围绕过筛选"] = (
+            everything == window.repo.count() and narrowed < everything
+        )
+        window.filter.clear()
+        window._reload_list()
+
+        from datetime import datetime as _dt
+
+        today = _dt.now().strftime("%Y-%m-%d")
+
+        class _Today(_Scope):
+            scope_key = "range"
+            date_from_text = today
+            date_to_text = today
+
+        class _Old(_Scope):
+            scope_key = "range"
+            date_from_text = "2000-01-01"
+            date_to_text = "2000-01-02"
+
+        class _Since(_Scope):
+            scope_key = "since_last"
+
+        results["日期区间含当天"] = (
+            len(window._collect_export_entries(_Today(), "")) == window.repo.count()
+        )
+        results["日期区间外取不到词"] = len(window._collect_export_entries(_Old(), "")) == 0
+        window.config["last_export_at"] = "2000-01-01 00:00:00"
+        results["增量范围取到上次之后的词"] = (
+            len(window._collect_export_entries(_Since(), "")) == window.repo.count()
+        )
+        window.config["last_export_at"] = ""
 
         with_filter = ExportDialog(total=1, filtered=True, parent=window)
         try:
@@ -2410,7 +2778,94 @@ def main() -> int:
 
         dlg.deleteLater()
 
-        # ② 版本落后 → _maybe_show_onboarding 会弹窗，并把版本号写回。
+        # ② 升级场景：第一屏换成更新说明，并多一个「不再提示」的勾选框。
+        from app.core import changelog as _cl
+
+        upgrade = ob.OnboardingDialog(
+            window._theme,
+            parent=window,
+            update_notes=_cl.welcome_releases("1.0.0"),
+        )
+        results["升级时多一页更新说明"] = upgrade._stack.count()
+        results["升级时停在更新页"] = upgrade._stack.currentIndex() == 0
+        results["更新页有不再提示的勾选框"] = len(
+            upgrade.findChildren(QCheckBox)
+        )
+        upgrade.skip_note_box.setChecked(True)
+        upgrade._finish_update()
+        results["勾选后记下不再提示"] = upgrade.skip_update_notes
+        upgrade.deleteLater()
+
+        # 首装（没有更新说明）不该多这一页，也不该出现一个只有升级才用得上的
+        # 勾选框——勾了也不会有人读它。
+        plain = ob.OnboardingDialog(window._theme, parent=window)
+        results["首装没有更新页"] = plain._stack.count()
+        results["首装没有勾选框"] = len(plain.findChildren(QCheckBox))
+        plain.deleteLater()
+
+        # ③ 谁该看到更新说明：首装不看、升级看、勾过不再看。
+        saved_config = dict(window.config)
+        try:
+            window.config["onboard_version"] = 0
+            results["首装不提示更新"] = len(window._pending_update_notes())
+            window.config["onboard_version"] = ob.CURRENT_ONBOARD_VERSION
+            window.config["last_seen_version"] = "1.0.0"
+            results["升级后提示的版本数"] = len(window._pending_update_notes())
+            window.config["skip_update_note"] = True
+            results["勾过不再提示更新"] = len(window._pending_update_notes())
+        finally:
+            window.config.clear()
+            window.config.update(saved_config)
+
+        # ④ 版本号是更新日志的入口，不是装饰。v1.8 把它从状态栏最右挪到
+        #    顶栏字标旁边：状态栏那一格排在接入方式与条数之后，找「我是哪一版」
+        #    得横扫一整行，而版本号与品牌名本来就是同一句话。
+        results["顶栏版本号徽章"] = window.btn_version.text()
+        results["版本号提示是更新日志"] = window.btn_version.toolTip()
+        results["版本号已不在状态栏"] = window.btn_version.parent() is not window.statusBar()
+        # ⑤ 三页分段：生词本 / 复习 / 统计。复习与统计都是**内嵌页**，不是弹窗
+        #    ——「点开一个对话框」和「切一页」在截图里区别不大，在操作上差得远：
+        #    前者每次都要关窗回到原处，后者左栏还能继续用。
+        results["左栏三个分页"] = [
+            window.btn_page_words.text(),
+            window.btn_page_review.text(),
+            window.btn_page_stats.text(),
+        ]
+        window.btn_page_stats.click()
+        results["统计页已切换"] = window.content.currentWidget() is window.stats
+        # 列表与筛选在复习 / 统计页上没有意义，藏起来是这一层的判据：
+        # 留着它们，用户会以为筛选还能用，而它筛的是一栏看不见的东西。
+        results["统计页隐藏了列表"] = not window._left_body.isVisible()
+        results["统计页四张卡都有数"] = all(
+            card.text().isdigit() for card in window.stats._cards.values()
+        )
+        results["七日图有七列"] = window.stats._chart_layout.count()
+        results["分段互斥"] = (
+            not window.btn_page_words.isChecked()
+            and window.btn_page_stats.isChecked()
+        )
+        window.btn_page_review.click()
+        page = window.content.currentWidget()
+        results["复习页已切换"] = type(page).__name__ == "ReviewDialog"
+        results["复习页是内嵌的"] = getattr(page, "_embedded", False) is True
+        results["复习页退出按钮文案"] = page._btn_close.text()
+        # 点它等于回到生词本：分段由 Qt 的互斥组自己纠正，不需要另写同步。
+        page._btn_close.click()
+        results["返回后复习页已销毁"] = window.review is None
+        results["返回后分段回到生词本"] = (
+            window.btn_page_words.isChecked()
+            and window.content.currentWidget() is window.detail_panel
+        )
+        from app.ui.changelog import ChangelogDialog as _ChangelogDialog
+
+        log_dialog = _ChangelogDialog(window._theme, parent=window)
+        results["更新日志对话框条目数"] = len(log_dialog._releases)
+        results["更新日志覆盖全部版本"] = (
+            len(log_dialog._releases) == len(_cl.RELEASES)
+        )
+        log_dialog.deleteLater()
+
+        # ⑤ 版本落后 → _maybe_show_onboarding 会弹窗，并把版本号写回。
         original_exec = ob.OnboardingDialog.exec
 
         def fake_exec(self):  # noqa: ANN001
@@ -2444,6 +2899,31 @@ def main() -> int:
             flush=True,
         )
 
+    def accent_check() -> None:
+        """强调竖线必须真的画出来。
+
+        v1.5 到 v1.6 之间，`#contextMeaning` 的 `border-left` 一次都没显示过：
+        QLabel 没有背景色时 Qt 不走 QSS 的完整盒模型，样式表里写着、
+        像素上没有。比对样式表只能证明「规则还在」，证明不了「它画了」，
+        所以这里查控件树——竖线是一个独立的 QFrame，宽度就是 2。
+        """
+        from PySide6.QtWidgets import QFrame as _QFrame
+
+        sample = Entry(
+            lemma="accentprobe",
+            definition_zh="竖线探针",
+            contextual_meaning="这里应当出现一道竖线。",
+        )
+        window.detail.show_entry(sample)
+        app.processEvents()
+
+        bars = window.detail.findChildren(_QFrame, "accentBar")
+        results["语境解释左侧有竖线"] = len(bars)
+        results["竖线宽两个像素"] = bars[0].width() if bars else 0
+        results["竖线旁边仍是语境标签"] = (
+            window.detail.findChild(QLabel, "contextMeaning") is not None
+        )
+
     def analytics_check() -> None:
         """统计告知页：两页的先后、表态才写配置、关掉不算同意、未勾选拒绝提交。
 
@@ -2456,6 +2936,7 @@ def main() -> int:
         import app.ui.consent as cs
         import app.ui.onboarding as ob
         import app.ui.settings as sm
+        import app.ui.report_flow as rf
         from app.ui.settings import SettingsDialog
 
         # ① 告知页的内容与默认态。默认必须是「没表态」，不是「关」——
@@ -2566,7 +3047,7 @@ def main() -> int:
         sd = SettingsDialog({**window.config, "analytics_enabled": False}, "", window)
         said: list[str] = []
         built: list[int] = []
-        real_box_s = sm.QMessageBox
+        real_box_s = rf.QMessageBox
         real_build = sm.report.build_report
 
         class _Box:
@@ -2577,13 +3058,13 @@ def main() -> int:
                 said.append(text)
                 return _Box.StandardButton.Ok
 
-        sm.QMessageBox = _Box
+        rf.QMessageBox = _Box
         sm.report.build_report = lambda *a, **k: (built.append(1), {})[1]
         try:
             sd.analytics.setChecked(False)
             sd._submit_report()
         finally:
-            sm.QMessageBox = real_box_s
+            rf.QMessageBox = real_box_s
             sm.report.build_report = real_build
         results["未勾选记录时拒绝提交报告"] = (len(built), bool(said))
         sd.deleteLater()
@@ -2599,7 +3080,7 @@ def main() -> int:
         os.environ["QUILL_REPORT_ENDPOINT"] = ""
         sd2 = SettingsDialog({**window.config, "analytics_enabled": True}, "", window)
         real_build2 = sm.report.build_report
-        real_exec2 = sm.ReportDialog.exec
+        real_exec2 = rf.ReportDialog.exec
         sm.report.build_report = lambda *a, **k: {
             "report_schema_version": 1,
             "arcquill_version": "9.9.9",
@@ -2608,14 +3089,18 @@ def main() -> int:
             "event_total": 3,
             "by_event": {"lookup": 3},
         }
-        sm.ReportDialog.exec = lambda self: (opened.append(1), 0)[1]
-        sd2._ask_github = lambda text, detail="": (asked.append(text), False)[1]
+        rf.ReportDialog.exec = lambda self: (opened.append(1), 0)[1]
+        # 那句「要不要改用 GitHub」现在住在 report_flow 的模块函数里，
+        # patch 设置页上的同名方法不再起作用——它已经不存在了。
+        real_ask = rf.ask_github
+        rf.ask_github = lambda parent, text, detail="": (asked.append(text), False)[1]
         try:
             sd2.analytics.setChecked(True)
             sd2._submit_report()
         finally:
             sm.report.build_report = real_build2
-            sm.ReportDialog.exec = real_exec2
+            rf.ReportDialog.exec = real_exec2
+            rf.ask_github = real_ask
         results["未配置地址时先问是否走 GitHub"] = (
             bool(asked) and "配置" in asked[0] and not opened
         )
@@ -2627,7 +3112,7 @@ def main() -> int:
         wrote: list[int] = []
         real_write = sm.report.write_report
         sm.report.write_report = lambda payload, target: (wrote.append(1), str(target))[1]
-        dlg = sm.ReportDialog(
+        dlg = rf.ReportDialog(
             window.config["theme"],
             {
                 "report_schema_version": 1,
@@ -2740,13 +3225,12 @@ def main() -> int:
             repo.get_by_id(before_id).review_count if before_id is not None else None
         )
         dlg._grade(review_mod.REMEMBERED)
-        # 四档分布是调 SM-2 参数的唯一依据：只记「评了几条」的话，全评「记住了」
+        # 三档分布是调 SM-2 参数的唯一依据：只记「评了几条」的话，全评「记住了」
         # 和半数「忘了」的会话在记录里长得一模一样。
-        results["四档评分各自计数"] = dlg.ratings() == {
+        results["三档评分各自计数"] = dlg.ratings() == {
             "forgot": 0,
             "fuzzy": 0,
             "remembered": 1,
-            "easy": 0,
         }
         after = repo.get_by_id(before_id) if before_id is not None else None
         results["复习评分推进了记忆状态"] = bool(
@@ -2758,6 +3242,27 @@ def main() -> int:
             (dlg.current_entry is not None and dlg.graded == 1)
             or (dlg.current_entry is None and dlg.graded == dlg.total)
         )
+
+        # 「太简单」不是第四档：点下去词要离开生词本，而评分分布保持不变。
+        # 这两条必须一起验——只验「归档了」的话，把 EASY 同时计进 remembered
+        # 也照样通过，而那份分布会被用来调 SM-2 参数。
+        doomed = dlg.current_entry
+        ratings_before = dlg.ratings()
+        if doomed is None:
+            results["太简单移出生词本"] = "队列已空，取不到下一个词"
+        else:
+            doomed_id = int(doomed.id or 0)
+            dlg._grade(review_mod.EASY)
+            moved = repo.get_by_id(doomed_id)
+            results["太简单移出生词本"] = bool(moved and moved.archived_at)
+            results["太简单不计入评分分布"] = dlg.ratings() == ratings_before
+            results["太简单单独计数"] = dlg.archived == 1
+            still_due = [
+                e.lemma
+                for e in repo.due_entries(review_mod.now_timestamp())
+                if int(e.id or 0) == doomed_id
+            ]
+            results["归档的词不再进复习队列"] = still_due == []
         dlg.deleteLater()
 
         print(
@@ -3943,6 +4448,15 @@ def main() -> int:
         """
         # ---- 回执已经收起 ----
         # 查词在 300ms，回执 2.4 秒后自己消失。还挂着不走的浮层会一直压在正文上。
+        #
+        # 等条件成立再读，不直接读：这一阶段排在 27s，而上一个阶段（surface）
+        # 可能刚查过词，那条 2.4 秒的窗口正好横跨这里。直接读会得到一条与
+        # 「浮层到底会不会自己消失」无关的偶发失败——实测同一个脚本一次绿
+        # 一次红，红的那次浮层只是还没到点。
+        _toast_deadline = time.monotonic() + 3.0
+        while window._toast.isVisible() and time.monotonic() < _toast_deadline:
+            app.processEvents()
+            time.sleep(0.01)
         results["回执已自动收起"] = not window._toast.isVisible()
 
         # ---- 写库失败：编辑不能跟着丢 ----
@@ -4037,6 +4551,7 @@ def main() -> int:
         collocation_check,
         surface_check,
         p0_check,
+        accent_check,
         import_check,
     ]
 
@@ -4135,6 +4650,9 @@ def main() -> int:
     # P0 那几条断言排在这里：它要把界面临时置成「恢复失败后的停用态」再还回去，
     # 必须独占一个没有别的阶段在跑的时间窗。
     QTimer.singleShot(27000, _guard(p0_check))
+    # 竖线这一阶段只做一次 show_entry，不碰列表与配置，排在 p0 之后、
+    # import 之前那段空窗里最省事。
+    QTimer.singleShot(30000, _guard(accent_check))
     # 导入是最后一个阶段，它在结尾 app.quit()。串行闸门靠「60ms 一次」的重试排队，
     # 无法保证「14000ms 的 collocation 一定比更晚的 import 先拿到执行权」。一旦
     # import 抢先跑完并 quit，collocation 的 30 项观测就变成「未采集到」，而且偶发。

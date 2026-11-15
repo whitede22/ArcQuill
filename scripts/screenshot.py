@@ -92,7 +92,11 @@ from app.ui.theme import stylesheet  # noqa: E402
 # 截图窗口的逻辑尺寸。脚本自身不放大，分辨率由 `QT_SCALE_FACTOR` 决定：
 # 设 2 时 `grab()` 取到的是 2 倍像素（2560×1600），文字按设备像素重新排版，
 # 比事后拉伸图片清楚得多。
-WINDOW_W, WINDOW_H = 1280, 800
+# 窗口尺寸。高度从 800 提到 940：v1.5 的详情区多了「语境中的含义」与
+# 「使用注意」两块，800 高时最后一块只露出标题、正文被切在视口外——真实
+# 界面滚动一下就能看到，但截图里那半截标签看着像排版坏了。940 刚好把备注框
+# 也装进来，否则被切掉的是同一个毛病。
+WINDOW_W, WINDOW_H = 1280, 940
 
 
 def _sample_background(path: Path) -> None:
@@ -213,6 +217,12 @@ def _seed(service: DictionaryService, repo: Repository) -> None:
     shown = repo.get("ubiquitous")
     if shown is not None:
         shown.notes = "记忆法：ubi（哪里）+ quit（任何）→ 哪里都在"
+        # 语境解释与使用注意：v1.5 新增的两块内容，只有接口模式才给得出。
+        # 截图跑的是示例来源（MockProvider），它本来就产出不了这两项，
+        # 所以这里手工补上——否则首页那张图永远拍不到新功能，而页面文案
+        # 已经在介绍它们了。
+        shown.contextual_meaning = "在这句里指「到处都能见到」，带一点腻味的口吻"
+        shown.usage_note = "口语里常用来形容某种做法已经泛滥，偏中性偏贬，正式文章少见"
         repo.upsert(shown)
 
     # 不完整词条：接口只给了英文释义与例句，中文释义/同义语/例句翻译都缺
@@ -467,6 +477,16 @@ def _scene_onboarding(window: MainWindow, config: dict, out: Path, tutorial: boo
     _save_later(dialog, out, 220)
 
 
+def _scene_changelog(window: MainWindow, config: dict, out: Path) -> None:
+    """更新日志。窗口尺寸就是这个对话框自己的最小尺寸，不额外放大——
+    它是给人扫一眼的，不是一张要放大看的表格。"""
+    from app.ui.changelog import ChangelogDialog
+
+    dialog = ChangelogDialog(config.get("theme"))
+    _as_child(dialog, window)
+    _save_later(dialog, out, 220)
+
+
 def _scene_settings(window: MainWindow, config: dict, wallpaper: Path, out: Path) -> None:
     # 设置页填一份能直接用的配置：空地址会当场报「请填写接口地址」，而截图
     # 要展示的是设置项本身，不是一次校验失败。模型名与地址互相匹配，避免
@@ -495,15 +515,21 @@ def _scene_settings(window: MainWindow, config: dict, wallpaper: Path, out: Path
 
 
 def _scene_review(window: MainWindow, repo: Repository, config: dict, out: Path) -> None:
-    from app.ui.review_dialog import ReviewDialog
+    """复习页。v1.8 起它嵌在内容区里，不再是弹窗。
 
-    dialog = ReviewDialog(repo, config.get("theme"))
-    # 翻到背面再摆出来：正面只有词与一句提示，展示不出「中文释义 + 例句 + 四档
-    # 评分」。**先翻面再 show()**，尺寸在第一次显示时按完整内容算；摆出来之后再
-    # 翻面的话，新长出来的那几行会挤在旧尺寸里，标题被压成一条黑边。
-    dialog._reveal()
-    _as_child(dialog, window)
-    _save_later(dialog, out, 320)
+    翻到背面再截：正面只有词与一句提示，看不出「释义 + 例句 + 三档评分 + 归档」。
+    """
+    window.btn_page_review.click()
+    page = window.review
+    if page is not None:
+        page._reveal()
+    _save_later(window, out, 320)
+
+
+def _scene_stats(window: MainWindow, out: Path) -> None:
+    """统计页。数字与柱子都是切过去那一刻现算的，所以要先切再等一帧。"""
+    window.btn_page_stats.click()
+    _save_later(window, out, 260)
 
 
 def _scene_export(window: MainWindow, out: Path) -> None:
@@ -572,7 +598,12 @@ def main() -> int:
     conn = connect(DB_PATH)
     init_db(conn)
     repo = Repository(conn)
-    service = DictionaryService(repo, MockProvider())
+    # 截图演示的是「接了接口」的样子：状态栏写着接口名，界面就该按接口画。
+    # 示例来源声明自己不提供语境，若不掰这一下，语境按钮会在图里消失——那
+    # 是真实行为，但演示的这份界面并不是示例模式。
+    provider = MockProvider()
+    provider.supports_context = True
+    service = DictionaryService(repo, provider)
     _seed(service, repo)
 
     app = QApplication(sys.argv)
@@ -593,10 +624,14 @@ def main() -> int:
         _scene_import(window, out)
     elif kind in ("onboarding", "onboarding_tutorial"):
         _scene_onboarding(window, config, out, kind == "onboarding_tutorial")
+    elif kind == "changelog":
+        _scene_changelog(window, config, out)
     elif kind == "phrases":
         _scene_phrases(window, out)
     elif kind == "review":
         _scene_review(window, repo, config, out)
+    elif kind == "stats":
+        _scene_stats(window, out)
     elif kind == "export":
         _scene_export(window, out)
     elif kind == "refresh":

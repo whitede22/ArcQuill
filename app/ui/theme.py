@@ -181,10 +181,10 @@ _DARK_THEMES = frozenset({"night"})
 # ---------------------------------------------------------------------------
 
 _RADIUS: dict[str, str] = {
-    "radius_container": "8px",  # 面板 / 卡片 / 列表：一块面的外轮廓
-    "radius_control": "6px",    # 按钮 / 输入框 / 下拉框 / 提示块：面上的控件
-    "radius_pill": "9px",       # 胶囊（同义语 chip）：等于它自身高度的一半
-    "radius_bar": "5px",        # 滚动条把手：等于把手宽度的一半
+    "radius_container": "10px",  # 面板 / 卡片 / 列表：一块面的外轮廓
+    "radius_control": "8px",     # 按钮 / 输入框 / 下拉框 / 提示块：面上的控件
+    "radius_pill": "11px",       # 胶囊（同义语 chip / 版本徽章）：等于其自身高度的一半
+    "radius_bar": "5px",         # 滚动条把手：等于把手宽度的一半
 }
 
 
@@ -346,16 +346,102 @@ QSplitter::handle { background: transparent; }
    都必须补齐模板全部键」两条断言约束，内联那一份只能靠单条测试盯。
    两个对话框仍然在构造时 `setStyleSheet(stylesheet(tid))`——**样式自持**这条性质
    照旧（不依赖 QApplication 的全局样式表），测试直接构造它们时拿得到正确配色。 */
+/* 顶栏。做成一条浮起的窄条而不是一条分割线：窗口底色与面板底色本来就差一档，
+   顶栏再压一条描边，屏幕上就有三层（底、条、卡），眼睛能分清主次。
+   圆角与面板同档——它和下面的两栏是同一个层级的东西，只是横着放。 */
+QFrame#topBar {
+    background: $surface;
+    border: 1px solid $border;
+    border-radius: $radius_container;
+}
+
+/* 版本徽章。位置在字标右侧，是更新日志的入口。
+   用强调色的浅底而不是描边：它需要「看一眼就知道自己是哪一版」，但不该跟
+   查询按钮抢注意力——实心强调色只留给主操作。
+   圆角走 pill：这个高度下等于半高，左看右看都是一颗胶囊。 */
+QPushButton#versionBadge {
+    background: $accent_soft;
+    color: $accent;
+    border: 1px solid transparent;
+    border-radius: $radius_pill;
+    padding: 1px 9px;
+    font-size: 11px;
+}
+QPushButton#versionBadge:hover { border-color: $accent; }
+QPushButton#versionBadge:pressed { color: $accent_hover; border-color: $accent_hover; }
+
+/* 页面分段：生词本 / 复习 / 统计。三个互斥的可勾选按钮。
+   未选中是纯文字，选中才浮出一块浅底——三段等宽且常驻，任何一段常亮都会让
+   整行看起来像三个按钮堆在一起，而不是一个三选一。
+
+   这一组与 `#mode`（生词本 / 词组收藏）是两层：上层换页，下层换集合。
+   两层的选中态刻意用同一种表现（强调色浅底 + 强调色字），因为它们是同一个
+   交互模式；差别只在字号，上层 13px、下层沿用按钮默认值。 */
+QPushButton#page {
+    background: transparent;
+    color: $text2;
+    border: 1px solid transparent;
+    border-radius: $radius_control;
+    padding: 5px 10px;
+    font-size: 14px;
+}
+QPushButton#page:hover { color: $text; }
+QPushButton#page:checked {
+    background: $accent_soft;
+    color: $accent;
+    font-weight: 600;
+}
+
+/* 统计页。四块数字卡各自独立，不合成一张大表：它们之间没有可比关系
+   （总数与待复习是两种问题），并排只是省地方。 */
+QFrame#statCard {
+    background: $track;
+    border: 1px solid $border;
+    border-radius: $radius_container;
+}
+QLabel#statValue { font-size: 24px; font-weight: 700; color: $text; }
+QLabel#statName  { font-size: 12px; color: $text2; }
+QLabel#pageTitle { font-size: 18px; font-weight: 700; color: $text; }
+QLabel#pageSub   { font-size: 12px; color: $text2; }
+/* 条形图的柱子。宽度由代码按当日数量算，这里只管颜色与圆角。
+   用强调色而不是正文色：它是这一页唯一的图形，让它承担「数据」的语义。 */
+QFrame#chartBar { background: $accent; border: none; border-radius: $radius_bar; }
+QFrame#chartTrack { background: $divider; border: none; border-radius: $radius_bar; }
+QLabel#chartLabel { font-size: 11px; color: $text2; }
+
 QDialog#onboarding { background: $surface; }
 /* 顶栏字标。透明底是必须的：它有自己的一层 alpha，再垫一块底色就会在深色主题
    下看到一圈浅色方块。也不挂进背景图的半透明规则——它不承载正文。 */
 QLabel#brand { background: transparent; border: none; }
 QLabel#welcomeTitle { font-size: 26px; font-weight: 700; color: $text; }
 QLabel#welcomeSub   { font-size: 14px; color: $text2; }
+/* 欢迎页标题旁的版本号。与顶栏那颗徽章是同一个语义，只是这里不需要可点击，
+   所以是 QLabel 不是 QPushButton；两处共用同一种表现（强调色浅底 + 胶囊）。 */
+QLabel#welcomeBadge {
+    background: $accent_soft;
+    color: $accent;
+    border-radius: $radius_pill;
+    padding: 2px 10px;
+    font-size: 12px;
+}
 QLabel#featureTitle { font-size: 14px; font-weight: 600; color: $text; }
 QLabel#featureBody  { font-size: 13px; color: $text2; }
 
+/* 更新日志。版本号比条目重，日期比两者都轻：扫一眼的落点是「哪一版」，
+   日期只在想对时间时才有用。条目左侧那道竖线把同一版本的内容框在一起，
+   比在每条前面加圆点更容易分辨分组；竖线本身同样走 `#accentBar`。 */
+QDialog#changelogDialog { background: $surface; }
+QLabel#changelogVersion { font-size: 15px; font-weight: 600; color: $text; }
+QLabel#changelogPoint { font-size: 13px; color: $text2; }
+
 QDialog#reviewDialog { background: $surface; }
+/* 内嵌进内容区的复习页。它和详情面板占同一块位置，所以也要同样的圆角与描边；
+   弹窗版不需要描边，窗口边框本身就是界限。 */
+QDialog#reviewPane {
+    background: $surface;
+    border: 1px solid $border;
+    border-radius: $radius_container;
+}
 QLabel#reviewTitle    { font-size: 22px; font-weight: 700; color: $text; }
 QLabel#reviewProgress { font-size: 12px; color: $text2; }
 QLabel#reviewLemma    { font-size: 32px; font-weight: 700; color: $text; }
@@ -404,6 +490,32 @@ QLabel#synNote  { font-size: 12px; color: $text2; }
 QLabel#collPhrase  { font-size: 13px; color: $text; font-weight: 600; }
 QLabel#collGloss   { font-size: 12px; color: $text2; }
 QLabel#collExample { font-size: 12px; color: $text; }
+
+/* 语境中的含义。**刻意与正文同色、同字号**，只靠左侧一道竖线把它与通用释义
+   分开：它是回答「这个词在这句话里指什么」，语气上属于结论，不是注释。
+
+   竖线不在这里画。QLabel 没有背景色时 Qt 不走 QSS 的完整盒模型，`border-left`
+   写了也不会出现（v1.5 到 v1.6 一直是这个状态）。改用 `widgets.with_accent_bar`
+   那个 2px 的 QFrame，样式见下面的 `#accentBar`。 */
+QLabel#contextMeaning {
+    font-size: 13px;
+    color: $text;
+}
+
+/* 那条竖线本体。宽度由代码设成 2px，这里只管颜色。 */
+QFrame#accentBar {
+    background: $accent;
+    border: none;
+}
+
+/* 使用注意。比正文弱一档：它是补充，不是结论。 */
+QLabel#usageNote { font-size: 13px; color: $text2; }
+
+/* 详情区那个「朗读」。尺寸比 #bare 更紧：它夹在音标与来源之间，占宽越少越好。 */
+QPushButton#bare[role="speak"] {
+    padding: 1px 6px;
+    font-size: 12px;
+}
 
 QPushButton {
     background: $surface;
@@ -465,6 +577,14 @@ QPushButton#statusButton:pressed { color: $accent_hover; }
    四角像素与未选中**完全相同**，用户在界面上看不出自己在哪个集合里。
    选中 = 强调色底 + 强调色字 + 强调色描边（描边宽度沿用通用的 1px，不跳尺寸）。
    配了背景图时底色还要再走一档半透明，那条由 `_veil_rules` 生成。 */
+/* 下层（集合）做成小一号的胶囊。两层都是可勾选按钮，若字号与内边距完全一样，
+   屏幕上就是两排等价的按钮，用户只能靠「上面三个下面两个」去猜谁管什么。
+   层的差别必须靠尺寸说出来。 */
+QPushButton#mode {
+    padding: 3px 11px;
+    font-size: 12px;
+    border-radius: $radius_pill;
+}
 QPushButton#mode:checked {
     background: $accent_soft;
     color: $accent;
@@ -509,7 +629,9 @@ QPushButton#cardDelete {
 QPushButton#cardDelete:hover { color: $warn_text; }
 QPushButton#cardDelete:pressed { color: $warn_text; }
 
-QLineEdit, QPlainTextEdit, QTextEdit, QSpinBox, QDoubleSpinBox {
+/* QDateEdit 进这一组：它继承 QAbstractSpinBox，不给规则时深色主题下会露出
+   系统默认的白底黑字——导出对话框里的日期框正是这样一块刺眼的白。 */
+QLineEdit, QPlainTextEdit, QTextEdit, QSpinBox, QDoubleSpinBox, QDateEdit {
     background: $input_bg;
     color: $text;
     border: 1px solid $input_border;
@@ -518,7 +640,9 @@ QLineEdit, QPlainTextEdit, QTextEdit, QSpinBox, QDoubleSpinBox {
     selection-background-color: $accent;
     selection-color: $on_accent;
 }
-QLineEdit:focus, QPlainTextEdit:focus, QTextEdit:focus { border-color: $accent; }
+QLineEdit:focus, QPlainTextEdit:focus, QTextEdit:focus, QDateEdit:focus {
+    border-color: $accent;
+}
 
 /* 排序下拉框给箭头留了位置，否则文字与箭头挤在一起。 */
 QComboBox { padding: 5px 22px 5px 9px; }
@@ -741,6 +865,9 @@ _STRONG_TEXT: tuple[tuple[str, str], ...] = (
     ("QLabel#sectionTitle", "text2_strong"),
     ("QLabel#collGloss", "text2_strong"),
     ("QLabel#collExample", "text2_strong"),
+    # 使用注意与 #muted 同色，同样要在最透档换加强色；语境解释与 #body 同色，
+    # 不登记——两者层次不同，这里跟着各自的正文走。
+    ("QLabel#usageNote", "text2_strong"),
     ("QLabel#placeholder", "text3_strong"),
 )
 
@@ -764,6 +891,11 @@ def _veil_rules(pal: dict[str, object]) -> str:
         # 变异脚本有一条锚点就是拿「它 + 收尾括号」定位的。
         ("QPushButton#review", "surface", ""),
         ("QPushButton#refresh", "surface", ""),
+        # 页面分段的选中态与统计卡：两者都直接压在原图上（不在面板里），
+        # 不垫底时最透那一档会把它们刷成透明，选中与未选中又分不出来。
+        ("QPushButton#page:checked", "accent_soft", ""),
+        ("QPushButton#page", "surface", ""),
+        ("QFrame#statCard", "track", ""),
         ("QPushButton#mode:checked", "accent_soft", ""),
         ("QPushButton#mode", "surface", ""),
     )

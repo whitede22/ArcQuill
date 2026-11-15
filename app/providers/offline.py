@@ -152,6 +152,10 @@ class OfflineDictProvider:
     """离线词典。数据源为 ECDICT 裁剪出的本地 SQLite。"""
 
     name = "offline"
+    # 离线词库是「词 → 释义」的静态语料，给不出「这个词在你这段话里指什么」。
+    # 声明为 False，界面据此隐藏语境输入框，而不是让用户贴一段话之后拿到
+    # 一条与上下文无关的释义，还以为程序读懂了。
+    supports_context = False
 
     def __init__(self, db_path: Path | str | None = None) -> None:
         if db_path is None:
@@ -220,7 +224,14 @@ class OfflineDictProvider:
 
     # ---------- 对外 ----------
 
-    def lookup(self, word: str) -> Entry:
+    def lookup(self, word: str, context: str = "") -> Entry:
+        """查一个词。`context` 被刻意忽略——这个词库没有理解上下文的能力。
+
+        参数留着是为了满足 Provider 的调用约定（`DictionaryService` 会把
+        context 原样传给任何 provider）。若这里不接，接口模式切到离线时
+        每一次带上下文的查词都会抛 TypeError，而那时用户看到的会是
+        「查询失败」——与「离线给不出语境解释」完全不是一回事。
+        """
         surface = (word or "").strip().lower()
         if not surface:
             raise ProviderError("请输入要查询的单词")

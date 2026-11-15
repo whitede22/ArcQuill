@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (
     QPlainTextEdit,
     QPushButton,
     QScrollArea,
+    QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
@@ -35,6 +36,32 @@ def _section_title(text: str) -> QLabel:
     return label
 
 
+def with_accent_bar(label: QLabel) -> QWidget:
+    """给一段文字套一道左竖线，表示「这是结论，不是注释」。
+
+    **不用 `border-left`**。QLabel 没有背景色时，Qt 不会走 QSS 的完整盒模型
+    绘制，`border` 一条也画不出来——v1.5 就是这么写的，样式表里明明有
+    `border-left: 2px solid`，截图上一条线都没有，而没人会去比对一份「本该
+    有竖线」的样式与像素。
+
+    这里换成一个 2px 宽的 `QFrame`：它的背景色是能画的（只要给了
+    `background`），竖线的粗细与颜色也不依赖文字块自身的盒模型。
+    """
+    row = QWidget()
+    h = QHBoxLayout(row)
+    h.setContentsMargins(0, 0, 0, 0)
+    h.setSpacing(10)
+
+    bar = QFrame()
+    bar.setObjectName("accentBar")
+    bar.setFixedWidth(2)
+    bar.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding)
+
+    h.addWidget(bar)
+    h.addWidget(label, 1)
+    return row
+
+
 class EntryDetail(QWidget):
     """右侧详情区。
 
@@ -45,6 +72,10 @@ class EntryDetail(QWidget):
     synonymClicked = Signal(str)
     refreshRequested = Signal(str)
     deleteRequested = Signal(int)
+    # 朗读这个词。主窗口接住之后交给 core.speech（系统语音），
+    # 详情面板自己不碰音频设备——它是一块渲染器，多一条外部依赖就多一处
+    # 「渲染时顺手做了别的事」。
+    speakRequested = Signal(str)
     noteChanged = Signal(int, str)
     tagsChanged = Signal(int, str)
     # 收藏一条固定搭配。携带的是**整条 Phrase**（含 source_lemma），不是 id：
@@ -55,6 +86,9 @@ class EntryDetail(QWidget):
     # 毫不相干的数据，合成一个信号就得靠调用方记住「现在是哪个模式」——
     # 记错的那一次会安静地删掉另一样东西。
     phraseDeleteRequested = Signal(int)
+    # 把归档的词放回生词本。与 refreshRequested 分开：刷新是「再看一次接口」，
+    # 恢复是「我要重新学这个词」，后者不联网、也不改变词条内容。
+    restoreRequested = Signal(int)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -62,6 +96,9 @@ class EntryDetail(QWidget):
         self._note_edit: QPlainTextEdit | None = None
         self._tag_edit: QLineEdit | None = None
         self._warn_label: QLabel | None = None
+        # 归档说明。与缺项、兜底、过期三种提示各自独立持引用：它们可任意组合
+        # 出现，复用一个变量就无法判断「现在显示的是哪一条」。
+        self._archived_label: QLabel | None = None
         # 与缺项提示分开持引用：两者可同时出现，也可都不出现，
         # 复用同一个变量会让「哪一条在显示」变得不可判定。
         self._stale_label: QLabel | None = None
@@ -73,6 +110,10 @@ class EntryDetail(QWidget):
         # 「已收藏的含本词的词组」那块文字。与缺项/陈旧/兜底三块分开持引用，
         # 理由同它们之间那样：几块可同时出现，也可以都不出现。
         self._collected_label: QLabel | None = None
+        # 语境解释与使用注意两块正文。持引用供自检读取：要断言「贴了上下文
+        # 之后这一块出现、没贴时不出现」，只能拿到真实渲染出来的那个标签。
+        self._context_label: QLabel | None = None
+        self._usage_label: QLabel | None = None
         # 详情区底部那一行操作（重新查询 / 删除词条）的布局。持引用是为了让
         # 「操作按什么顺序摆」这件事可被观测——布局并不挂在按钮的父控件上，
         # 从控件树反查拿不到它。
@@ -81,6 +122,9 @@ class EntryDetail(QWidget):
         # 接口模式下点「重新查询」真的会去问接口；离线模式下重查的还是同一本
         # 词典，白点一次不如直说去设置里切模式。
         self._networked = False
+        # 系统上有没有可用的语音合成。由主窗口在启动时探测一次传进来——
+        # 探测本身要初始化 COM（几十毫秒），放渲染里做等于每查一个词都付一次。
+        self._speech_ok = False
         self._loading = False
 
         self.scroll = QScrollArea()
@@ -116,6 +160,8 @@ class EntryDetail(QWidget):
         self._source_label = None
         self._collect_buttons = {}
         self._collected_label = None
+        self._context_label = None
+        self._usage_label = None
         self._loading = True
         inner = self._reset()
         tip = QLabel(
@@ -139,6 +185,15 @@ class EntryDetail(QWidget):
         """
         self._networked = bool(networked)
 
+    def set_speech(self, available: bool) -> None:
+        """告知系统上有没有可用的语音合成。
+
+        不可用时喇叭按钮**整个不渲染**，而不是渲染成灰色：一个永远点不动的
+        按钮会让人以为程序坏了，而真相只是这台机器没装语音包。没有这一块
+        词条照样能看，缺了它不算缺项。
+        """
+        self._speech_ok = bool(available)
+
     def show_entry(self, entry: Entry | None, collected: list[str] | None = None) -> None:
         """渲染一个词条。
 
@@ -158,12 +213,15 @@ class EntryDetail(QWidget):
         # 「连着查下一个词」时必经。
         self._collect_buttons = {}
         self._collected_label = None
+        self._context_label = None
+        self._usage_label = None
         self._loading = True
         inner = self._reset()
         try:
             inner.addLayout(self._build_head(entry))
             inner.addWidget(_divider())
             self._add_hints(inner, entry)
+            self._add_archived_hint(inner, entry)
             self._add_body(inner, entry, collected)
             self._add_user_fields(inner, entry)
 
@@ -209,6 +267,24 @@ class EntryDetail(QWidget):
         fallback.setWordWrap(True)
         inner.addWidget(fallback)
         self._fallback_label = fallback
+
+    def _add_archived_hint(self, inner: QVBoxLayout, entry: Entry) -> None:
+        """归档说明。只有从「已归档」筛选里点开的词条才会看到。
+
+        必须显式说出来：这条词的内容与生词本里的完全一致，不解释的话，用户会
+        以为「已归档」只是个标签，回头发现它没出现在复习队列里，会当成程序漏了。
+        """
+        self._archived_label = None
+        if not entry.archived_at:
+            return
+        label = QLabel(
+            f"已归档于 {entry.archived_at[:10]}　这个词不在复习队列里，"
+            "点下方「放回生词本」可以重新开始复习"
+        )
+        label.setObjectName("muted")
+        label.setWordWrap(True)
+        inner.addWidget(label)
+        self._archived_label = label
 
     def _add_missing_hint(self, inner: QVBoxLayout, entry: Entry) -> None:
         """缺项提示。只把该来源「结构上能给」的要素算作缺项。
@@ -275,6 +351,21 @@ class EntryDetail(QWidget):
         self._add_section(inner, "英", entry.definition_en)
         self._add_section(inner, "中", entry.definition_zh)
 
+        # 语境中的含义排在同义语**之前**：用户贴了一段上下文，最想先看到的就是
+        # 「这个词在人家那句话里到底指什么」。排到例句后面等于把答案埋在
+        # 他已经知道的通用释义之后。
+        if entry.contextual_meaning:
+            inner.addSpacing(4)
+            inner.addWidget(_section_title("语境中的含义"))
+            context = QLabel(entry.contextual_meaning)
+            context.setObjectName("contextMeaning")
+            context.setWordWrap(True)
+            context.setTextInteractionFlags(
+                Qt.TextInteractionFlag.TextSelectableByMouse
+            )
+            inner.addWidget(with_accent_bar(context))
+            self._context_label = context
+
         if entry.synonyms:
             inner.addSpacing(4)
             inner.addWidget(_section_title(f"同义语　{len(entry.synonyms)} 个"))
@@ -322,6 +413,21 @@ class EntryDetail(QWidget):
                 example_zh.setObjectName("muted")
                 example_zh.setWordWrap(True)
                 inner.addWidget(example_zh)
+
+        # 使用注意排在最后：它讲的是「用的时候别踩哪些坑」，属于看完释义与
+        # 例句之后才需要的补充。放在最前面会把用户最想看的释义挤下去。
+        #
+        # 这一块与 `notes`（用户自己写的备注）是两回事，各占一块，谁也不会
+        # 覆盖谁：模型写的是语域与句型，用户写的是记忆法与联想。
+        if entry.usage_note:
+            inner.addSpacing(4)
+            inner.addWidget(_section_title("使用注意"))
+            usage = QLabel(entry.usage_note)
+            usage.setObjectName("usageNote")
+            usage.setWordWrap(True)
+            usage.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+            inner.addWidget(usage)
+            self._usage_label = usage
 
     def _add_user_fields(self, inner: QVBoxLayout, entry: Entry) -> None:
         """备注与标签，两者都自动保存。"""
@@ -554,6 +660,19 @@ class EntryDetail(QWidget):
             pos.setObjectName("pos")
             row.addWidget(pos)
 
+        # 喇叭紧挨音标：看到音标的人第一反应就是「怎么念」。系统没有语音包时
+        # 整个按钮不出现（见 set_speech），而不是留一个点不动的灰块。
+        if self._speech_ok:
+            speak = QPushButton("朗读")
+            speak.setObjectName("bare")
+            speak.setProperty("role", "speak")
+            speak.setCursor(Qt.CursorShape.PointingHandCursor)
+            speak.setToolTip(f"用系统语音朗读 {entry.lemma}")
+            speak.clicked.connect(
+                lambda _=False: self.speakRequested.emit(entry.lemma)
+            )
+            row.addWidget(speak)
+
         row.addStretch(1)
 
         if entry.source:
@@ -640,11 +759,25 @@ class EntryDetail(QWidget):
         # 两端、中间空一大片，看起来像两个互不相关的按钮。
         row.addStretch(1)
 
-        refresh = QPushButton("重新查询")
-        refresh.setObjectName("bare")
-        refresh.setToolTip("忽略本地缓存，重新向接口请求")
-        refresh.clicked.connect(lambda _=False: self.refreshRequested.emit(entry.lemma))
-        row.addWidget(refresh)
+        if entry.archived_at:
+            # 归档词的第一动作是「放回来」，不是「再查一次」：重新查询会把
+            # 词条写活（见 Repository._update_row），但那是副作用，不该让
+            # 用户靠它去恢复一条词。所以这一态下不挂「重新查询」。
+            restore = QPushButton("放回生词本")
+            restore.setObjectName("bare")
+            restore.setToolTip("重新排进复习队列，立即到期")
+            restore.clicked.connect(
+                lambda _=False: self.restoreRequested.emit(int(entry.id or 0))
+            )
+            row.addWidget(restore)
+        else:
+            refresh = QPushButton("重新查询")
+            refresh.setObjectName("bare")
+            refresh.setToolTip("忽略本地缓存，重新向接口请求")
+            refresh.clicked.connect(
+                lambda _=False: self.refreshRequested.emit(entry.lemma)
+            )
+            row.addWidget(refresh)
 
         remove = QPushButton("删除词条")
         remove.setObjectName("bare")

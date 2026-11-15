@@ -29,15 +29,20 @@ Built for curious minds, deep readers, and anyone who wants to make every word c
 - Search words with a local dictionary.
 - Look up vocabulary without depending on an online dictionary service.
 - Quickly access word definitions and build your personal vocabulary collection.
+- Tap the speaker next to the phonetic spelling to hear the word read aloud.
 
 ### 🪶 Build your own vocabulary
 - Save words and useful expressions as you encounter them.
 - Organize your collection with tags and search.
+- Filter by learning state or part of speech to see only what is due today, or only one kind of word.
+- Export by date added, or only the words added since your last export.
 - Import and export vocabulary in supported formats.
 - Keep your learning materials under your own control.
 
 ### 🔮 Understand words in context
 - Explore collocations and distinctions between similar words.
+- Paste a passage before looking a word up, and the explanation follows what it means in that passage.
+- Each entry carries a short usage note covering when the word fits and how it is commonly misused.
 - Get Chinese explanations with optional AI assistance.
 - Use your own API key to access supported AI services.
 
@@ -45,12 +50,15 @@ Built for curious minds, deep readers, and anyone who wants to make every word c
 
 ### 🧠 Remember what you learn
 - Review saved vocabulary with spaced repetition.
-- Use a four-grade review system to track how well you remember words.
+- Use a three-grade review system to track how well you remember words.
+- Words you mark as too easy leave the list; they stay in the archive and can be brought back at any time.
 - Turn occasional lookups into a sustainable learning habit.
 
 ### 🛡️ Keep your workflow local
 - Use the local dictionary without requiring an AI service.
 - Back up and restore your vocabulary data using supported features.
+- Check for a new release once at startup, and only when one actually exists. The request reads a public endpoint and carries nothing about your machine.
+- After an upgrade, the first launch explains what changed. Click the version number in the lower right to read it again.
 - Access optional usage statistics to better understand your learning and application performance.
 
 *Network access and data handling depend on the feature you use. See [Privacy and Data](#-privacy-and-data) for details.*
@@ -99,7 +107,7 @@ Phrase mode. Expressions saved while reading sit in their own list, linked back 
   <img src="docs/showcase/03-review.png" width="500" alt="ArcQuill review card">
 </p>
 
-A review card after flipping. Four grades decide when the word comes back.
+A review card after flipping. Three grades decide when the word comes back, and marking a word as too easy moves it out of the list.
 
 <p align="center">
   <img src="docs/showcase/04-export.png" width="440" alt="ArcQuill export dialog">
@@ -154,8 +162,8 @@ ArcQuill aims to make vocabulary collection and review easier, faster, and more 
 
 Potential areas for improvement include:
 
-- [ ] A smoother first-launch experience
-- [ ] Clearer guidance for new users
+- [x] A smoother first-launch experience
+- [x] Clearer guidance for new users
 - [ ] More efficient vocabulary review
 - [ ] Better visibility into learning progress
 - [ ] Improved packaging and distribution

@@ -34,6 +34,7 @@ from PySide6.QtWidgets import (
     QProgressDialog,
     QPushButton,
     QSplitter,
+    QStackedWidget,
     QSystemTrayIcon,
     QVBoxLayout,
     QWidget,
@@ -71,12 +72,23 @@ from ..core.importer import (
     split_words,
 )
 from ..core import review
+from ..core import update as update_check
 from ..core.log import get_logger, log_exception
-from ..core.models import Entry, Phrase, join_tags
-from ..core.repository import Repository
+from ..core.models import Entry, Phrase, join_tags, pos_label, split_pos
+from ..core.repository import (
+    STATE_ALL,
+    STATE_ARCHIVED,
+    STATE_DUE,
+    STATE_LABELS,
+    STATE_MASTERED,
+    STATE_NEW,
+    Repository,
+)
+from ..core.speech import speaker as speech_speaker
 from ..providers import build_provider, provider_status
 from ..providers.base import provided_fields, provider_label, supports_phrases
 from ..security.keystore import load_api_key
+from ..version import APP_VERSION
 from .background import BackgroundRenderer
 from .export_dialog import EXPORT_FORMATS, ExportDialog, FormatHelpDialog
 from .hotkey import HOTKEY_TEXT, GlobalHotkey, clipboard_seed
@@ -84,11 +96,38 @@ from .hotkey import available as hotkey_available
 from .refresh_dialog import RefreshDialog
 from .review_dialog import ReviewDialog
 from .settings import SettingsDialog
+from .stats_panel import StatsPanel
 from .theme import BG_VEIL_DEFAULT, palette, stylesheet, theme_id_of, veil_level
 from .widgets import EntryCard, EntryDetail
 from .workers import submit
 
 _USER_ROLE = Qt.ItemDataRole.UserRole
+
+
+def _widget_alive(widget: QWidget) -> bool:
+    """控件的 C++ 对象是否还在。
+
+    `QTimer.singleShot` 带 context 的重载本该在 context 析构后取消投递，但
+    `--selfcheck` 这条路径证明它挡不住：`deleteLater()` 与排在同一轮事件处理里的
+    回调撞在一起时，回调照样执行，随后在 `super().__init__(parent)` 处抛
+    `Internal C++ object (MainWindow) already deleted`。退出码不受影响，可一段
+    traceback 打在 stderr 上，看起来就像崩了。
+
+    判据用「访问任意 Qt 属性」：已析构的包装器一碰就抛 `RuntimeError`，比记一个
+    标志位可靠，也不依赖 `shiboken6` 这个间接依赖在打包后是否被收集进来。
+    """
+    try:
+        widget.objectName()
+    except RuntimeError:
+        return False
+    return True
+
+
+# 内容区的三个页。用字符串而不是 0/1/2：复习页是动态挂上去的，索引会变，
+# 而 `setCurrentWidget` 拿的是控件；只有段选状态需要认名字。
+PAGE_WORDS = "words"
+PAGE_REVIEW = "review"
+PAGE_STATS = "stats"
 
 # 标题栏左上角字标的高度（逻辑像素）。素材按 48 像素高输出，显示时减半，正好
 # 落在 2 倍缩放的屏幕上；1 倍屏由 Qt 平滑下采，笔画略柔但不至于糊成一团。
@@ -202,9 +241,18 @@ def _brief(text: str, limit: int = 44) -> str:
     flat = " ".join(str(text or "").split())
     return flat[:limit] + ("…" if len(flat) > limit else "")
 
-# 单次渲染的条目上限。QListWidget 插入上万行会明显卡顿，
-# 超出时提示用户用搜索缩小范围，而不是硬扛。
-LIST_LIMIT = 1000
+# 每次往列表里塞多少行。QListWidget 一次性插入上万行会明显卡顿（每行还要
+# 建一张卡片控件），所以列表改成**滚动到底再加载下一段**。
+#
+# 这里给的是「一页」，不是「上限」：旧版本用 LIST_LIMIT=1000 硬截断，超出之后
+# 只能靠搜索缩小范围——用户攒到一千条就不再长了，而他并不知道自己被截断了
+# （计数标签写着「已显示 1000 条 · 共 1327 条 · 请用搜索缩小范围」，仍是一句
+# 让人放弃的话）。按需加载把上限去掉，只保留「一次画多少」。
+LIST_PAGE = 200
+
+# 距离底部还有多少像素时开始加载下一页。提前一屏，滚到底时下一段已经在手上，
+# 不会出现「滚到底、停一下、然后才长出来」的顿感。
+LIST_PREFETCH = 240
 
 # 导入时一次交给后台的词数。分批是为了让「取消」有落点、进度能走：
 # 整批一次提交的话，用户点了取消也要等全部跑完才停得下来。
@@ -260,6 +308,20 @@ class MainWindow(QMainWindow):
         # 列表重载时 clear() 已把旧项连同旧卡片一起销毁，拿着已删除的对象去访问
         # 会抛 RuntimeError，而这条路径恰好在「删完一条接着重载」时必经。
         self._selected_card: EntryCard | None = None
+        # 两个筛选条件。与标签筛选、搜索框一起构成「这一屏显示哪些词条」的四个
+        # 正交条件，判据统一在 `Repository.query_entries` 里。
+        self._state_filter = STATE_ALL
+        self._pos_filter = ""
+        # 这一屏的**完整**结果，以及已经画出来的行数。列表只画前 `_rendered`
+        # 条，滚到底再补一页——所以列表能装下多少条不再有上限。
+        self._visible_entries: list[Entry] = []
+        self._rendered = 0
+        # 补渲染的重入闸。`addItem` 会移动滚动条，而滚动条变化又会触发加载判断：
+        # 不挡的话一次滚动能连着补好几页，用户看到的是「一滑到底就卡一下」。
+        self._loading_more = False
+        # 首启引导走到第几步：0 不在引导里，1 等用户查词，2 等他评一次分。
+        # 状态放在窗口上，因为「下一步该提示什么」要等异步的查词结果回来才知道。
+        self._practice_step = 0
 
     def _init_background_state(self) -> None:
         """背景图与当前主题。"""
@@ -335,6 +397,9 @@ class MainWindow(QMainWindow):
         self._op_name = "lookup"
         self._lookup_kind = "online"
         self._lookup_cached = False
+        # 这一趟带没带语境。放在窗口上而不是参数里：结果经 submit 绕一圈回来，
+        # 调用栈已经没了，而状态栏那句「这次没有给出语境解释」要用它。
+        self._lookup_context = ""
         self._pending_source = "manual"
         # 备份恢复要关掉 main 里那个连接才能替换文件，所以具体流程由 main 注入。
         # 为 None 时（自检、截图脚本直接构造窗口）按钮不出现。
@@ -365,11 +430,24 @@ class MainWindow(QMainWindow):
         self._restore_state()
         self._wire_signals()
         self._reload_list()
+        # 语境入口与朗读按钮都取决于「当前来源/系统能不能做这件事」，
+        # 要在界面建好之后按真实能力摆一次，而不是先摆出来再说。
+        self._sync_context_available()
+        self.detail.set_speech(speech_speaker().available())
         # 托盘要在界面搭完之后建：气泡与菜单都要一个活着的窗口做父级。
         self._setup_tray()
         # 首次启动（或教程升级后）弹出欢迎页。用 singleShot 延后到事件循环：
         # 窗口要先 show() 出来，弹窗才有正确的父级与层级。
-        QTimer.singleShot(0, self._maybe_show_first_run)
+        #
+        # 两个调用都带上 `self` 作为 context：窗口在排队期间被销毁时，Qt 会
+        # 直接取消这次投递。不带的话，`--selfcheck` 那种「建完窗口立刻退出」
+        # 的路径会在回调里撞上已析构的 C++ 对象，抛
+        # `Internal C++ object (MainWindow) already deleted`——它不影响退出码，
+        # 但一段 traceback 打在 stderr 上，看起来像崩了。
+        QTimer.singleShot(0, self, self._maybe_show_first_run)
+        # 检查更新排在首次引导之后：启动瞬间要先把界面给出来，而更新是
+        # 「知道了就行」的信息，晚两秒再问完全不影响任何事。
+        QTimer.singleShot(2600, self, self._start_update_check)
 
     # ---------- 托盘与全局热键 ----------
 
@@ -537,20 +615,131 @@ class MainWindow(QMainWindow):
         self._pending_source = "clipboard"
 
     def _maybe_show_onboarding(self) -> None:
-        """教程版本号落后于当前版本时，弹出欢迎页并写回新版本。
+        """教程版本落后、或程序刚升级时，弹出欢迎页。
 
-        判据是 `onboard_version < CURRENT_ONBOARD_VERSION`（版本号递增），
-        不是「是否看过」的 bool——教程大改后老用户也能看到新版。
+        两条判据是分开的，任意一条成立就弹：
+        - `onboard_version < CURRENT_ONBOARD_VERSION`：教程大改，谁都要看一遍；
+        - `last_seen_version` 比当前版本旧：刚从旧版升上来，第一屏换成更新说明。
+
+        首装不显示更新说明。判据是 `onboard_version == 0`——它意味着欢迎页本身
+        都没走过，那这个人没有「上一次」，讲「这次改了什么」对他没有意义。
         """
         from .onboarding import CURRENT_ONBOARD_VERSION, OnboardingDialog
 
         seen = self.config.get("onboard_version", 0)
-        if not isinstance(seen, int) or seen >= CURRENT_ONBOARD_VERSION:
+        tutorial_due = not isinstance(seen, int) or seen < CURRENT_ONBOARD_VERSION
+        notes = self._pending_update_notes()
+        if not tutorial_due and not notes:
+            self._remember_version()
             return
-        dialog = OnboardingDialog(self._theme, parent=self)
+
+        dialog = OnboardingDialog(self._theme, parent=self, update_notes=notes)
         dialog.exec()
         self.config["onboard_version"] = CURRENT_ONBOARD_VERSION
+        self.config["last_seen_version"] = APP_VERSION
+        # 只有真显示了更新页、用户也真勾了，才写这个开关。首装路径上
+        # `skip_note_box` 根本不存在，读它会 AttributeError。
+        if notes and dialog.skip_update_notes:
+            self.config["skip_update_note"] = True
         save_config(self.config)
+        # 用户在第三页点了「带我查第一个词」。引导的真实动作在主窗口这边，
+        # 因为要聚焦输入框、听查词结果、再等一次评分——都是窗口的职责。
+        if dialog.practice:
+            self._start_practice()
+
+    def _pending_update_notes(self) -> tuple:
+        """升级后该在欢迎页摊开哪些版本说明。两种人返回空：首装、勾过不再提示。"""
+        from ..core import changelog
+
+        if bool(self.config.get("skip_update_note", False)):
+            return ()
+        seen = self.config.get("onboard_version", 0)
+        if not isinstance(seen, int) or seen <= 0:
+            return ()
+        last = str(self.config.get("last_seen_version", "") or "")
+        return changelog.welcome_releases(last)
+
+    def _remember_version(self) -> None:
+        """把当前版本写回配置，下次启动才知道自己是升上来的。
+
+        值没变就不落盘：这个方法每次启动都会走一遍，配置文件的修改时间不该
+        跟着启动次数一起变。
+        """
+        if str(self.config.get("last_seen_version", "") or "") == APP_VERSION:
+            return
+        self.config["last_seen_version"] = APP_VERSION
+        save_config(self.config)
+
+    # ---------- 首启引导：跟着做一遍 ----------
+    #
+    # 三步都靠**已经发生的事**推进，不做假交互：第 1 步等真实查词成功，第 2 步
+    # 等复习会话里真的评过分。用户中途放弃时状态就停在那里，不会因为「他点了
+    # 跳过但引导还在」而出现一个永远走不完的流程。
+
+    _PRACTICE_STEPS: tuple[str, str] = (
+        "第 1 步：在上方输入框里打一个英文单词，按回车。查到的词会自己进生词本。",
+        "第 2 步：右侧详情已经出来了。点左栏「待复习」，给它评一次分。",
+    )
+
+    def _start_practice(self) -> None:
+        """进入第 1 步：把焦点放到输入框，并把该做什么写在状态栏。
+
+        用状态栏而不是弹一个「第 1 步」的小窗：查词过程本来就在状态栏上报告，
+        再开一个窗要用户去点掉，而他真正要做的是打字。
+        """
+        self._practice_step = 1
+        if self._mode != MODE_WORDS:
+            self._switch_mode(MODE_WORDS)
+        self.input.setFocus()
+        self.statusBar().showMessage(self._PRACTICE_STEPS[0], 20000)
+
+    def _practice_after_lookup(self) -> None:
+        if self._practice_step != 1:
+            return
+        self._practice_step = 2
+        self.statusBar().showMessage(self._PRACTICE_STEPS[1], 20000)
+
+    def _practice_after_review(self, graded: int) -> None:
+        if self._practice_step != 2 or not graded:
+            return
+        self._practice_step = 0
+        self.statusBar().showMessage(
+            "引导做完了。以后想复习就点「待复习」，想查词还是直接回车。", 9000
+        )
+
+    # ---------- 检查更新 ----------
+
+    def _start_update_check(self) -> None:
+        """启动后静默问一次有没有新版本。
+
+        失败时什么都不发生（`update.check` 自己吞掉所有异常并返回 None）：
+        查不到更新是一件用户不关心也没法处理的事，为它弹窗等于用噪音换安全感。
+        """
+        if not _widget_alive(self):
+            return
+        if not bool(self.config.get("check_updates", True)):
+            return
+        submit(update_check.check, on_success=self._on_update_found)
+
+    def _on_update_found(self, info) -> None:
+        if info is None:
+            return
+        self._update_info = info
+        self.update_label.setText(info.display())
+        self.update_label.setToolTip(
+            f"打开下载页（当前 {APP_VERSION}，最新 {info.version}）"
+        )
+        self.update_label.setVisible(True)
+
+    def _open_update_page(self) -> None:
+        if self._update_info is not None:
+            QDesktopServices.openUrl(QUrl(self._update_info.url))
+
+    def _open_changelog(self) -> None:
+        """打开全部版本的更新日志。顶栏的版本徽章点这里。"""
+        from .changelog import ChangelogDialog
+
+        ChangelogDialog(self._theme, parent=self).exec()
 
     def _maybe_show_first_run(self) -> None:
         """首启的两页按固定顺序弹：先欢迎页，后统计告知。
@@ -559,6 +748,8 @@ class MainWindow(QMainWindow):
         那个才发现底下还有一个；在没有窗口系统的环境里，则表现为整个进程卡在
         `exec()` 上，且不报错。
         """
+        if not _widget_alive(self):
+            return
         self._maybe_show_onboarding()
         self._maybe_show_consent()
 
@@ -570,6 +761,11 @@ class MainWindow(QMainWindow):
         """
         from .consent import ConsentDialog
 
+        # 欢迎页的 `exec()` 是个嵌套事件循环，窗口可能就在那期间被 `deleteLater()`
+        # 收走（`--selfcheck` 正是这条路径）。所以这里要再探一次，不能只靠
+        # `_maybe_show_first_run` 入口那一道。
+        if not _widget_alive(self):
+            return
         if bool(self.config.get("analytics_consent_decided", False)):
             return
         dialog = ConsentDialog(self._theme, parent=self)
@@ -767,16 +963,57 @@ class MainWindow(QMainWindow):
     # ---------- 界面搭建 ----------
 
     def _build_ui(self) -> None:
+        # 当前页与复习页实例。复习页是按需挂上来的，切走即销毁
+        # （见 `_show_page`），所以这里只留一个占位。
+        self._page = PAGE_WORDS
+        self.review: ReviewDialog | None = None
+        self._review_started = 0.0
         central = QWidget()
         root = QVBoxLayout(central)
-        root.setContentsMargins(16, 14, 16, 8)
-        root.setSpacing(12)
+        root.setContentsMargins(12, 12, 12, 8)
+        root.setSpacing(10)
 
         self._build_top_bar(root)
+        root.addWidget(self._build_context_panel())
         root.addWidget(self._build_splitter(), 1)
         self.setCentralWidget(central)
         self._build_status_bar()
         self._build_toast()
+
+    def _build_context_panel(self) -> QWidget:
+        """语境输入区，默认收起。
+
+        **为什么收在按钮后面而不是常驻**：查词是高频动作，而带语境查是偶尔才做
+        的一次（读到读不懂的句子）。常驻一块输入框会把左栏压短一截，代价由
+        每一次普通查词承担。
+
+        **为什么不做字数截断**：边输边截会在粘贴超长文本时光标跳到开头，用户
+        以为程序把内容弄丢了。这里放任输入，只在送进提示词时截到
+        `prompts.CONTEXT_LIMIT`，并在上方小字里说清这件事。
+        """
+        from PySide6.QtWidgets import QPlainTextEdit
+
+        self.context_panel = QWidget()
+        layout = QVBoxLayout(self.context_panel)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(4)
+
+        hint = QLabel(
+            "贴一段英文，查词时按这段话解释词义；超出的部分不会带给接口。留空就是普通查词。"
+        )
+        hint.setObjectName("muted")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+
+        self.context_edit = QPlainTextEdit()
+        self.context_edit.setPlaceholderText(
+            "例如：The charges against him were dropped after the witness withdrew."
+        )
+        self.context_edit.setFixedHeight(56)
+        layout.addWidget(self.context_edit)
+
+        self.context_panel.setVisible(False)
+        return self.context_panel
 
     def _build_toast(self) -> None:
         """查词结果那条「已保存至生词表」。
@@ -820,7 +1057,7 @@ class MainWindow(QMainWindow):
             self._place_toast()
 
     def _build_top_bar(self, root: QVBoxLayout) -> None:
-        """顶部一行：字标、输入框、主操作、常规与次要三档按钮。"""
+        """顶部一条：字标、版本徽章、输入框、主操作、常规与次要三档按钮。"""
         # 字标放在最左，是这块区域里唯一不随窗口宽度变化的东西：用户扫一眼就知道
         # 自己在哪个程序里，而后面的输入框与按钮该伸缩就伸缩。
         self.brand = QLabel()
@@ -832,6 +1069,18 @@ class MainWindow(QMainWindow):
         self.brand.setToolTip(f"{APP_NAME} · 英语生词本")
         self._refresh_brand()
 
+        # 版本徽章紧跟字标。位置从状态栏最右挪过来：它在状态栏里排在接入方式与
+        # 条数之后，用户想确认「我这是哪一版」时视线要横扫过一整行；而版本号与
+        # 品牌名本来就是同一件事。
+        #
+        # 它同时是更新日志的入口。回看「哪个版本加的功能」是版本号最自然的用途，
+        # 挂在这里比藏在设置里少两次点击。
+        self.btn_version = QPushButton(f"v{APP_VERSION}")
+        self.btn_version.setObjectName("versionBadge")
+        self.btn_version.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_version.setToolTip("查看更新日志")
+        self.btn_version.clicked.connect(self._open_changelog)
+
         self.input = QLineEdit()
         self.input.setPlaceholderText("输入英语单词，回车查询并收藏")
         self.input.setMinimumHeight(33)
@@ -839,6 +1088,16 @@ class MainWindow(QMainWindow):
 
         self.btn_query = QPushButton("查询")
         self.btn_query.setObjectName("primary")
+
+        # 语境入口。默认收起：绝大多数查词不需要它，常驻一个 60px 高的输入框
+        # 会把列表挤下去。勾上才展开（见 `_build_context_panel`）。
+        self.btn_context = QPushButton("语境")
+        self.btn_context.setObjectName("bare")
+        self.btn_context.setCheckable(True)
+        self.btn_context.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_context.setToolTip(
+            "贴一段英文，查词时让接口按这段话解释词义（只有接口模式支持）"
+        )
 
         self.btn_import = QPushButton("导入")
         self.btn_import.setToolTip(
@@ -862,11 +1121,18 @@ class MainWindow(QMainWindow):
         for button in (self.btn_format_help, self.btn_backup, self.btn_settings):
             button.setObjectName("bare")
 
-        top = QHBoxLayout()
+        # 顶栏单独成条。它有自己的底色与描边，与下面两栏隔开一段空隙，
+        # 眼睛不用找分割线就知道「这一行是工具，下面那块是内容」。
+        bar = QFrame()
+        bar.setObjectName("topBar")
+        top = QHBoxLayout(bar)
+        top.setContentsMargins(12, 8, 12, 8)
         top.setSpacing(8)
         top.addWidget(self.brand)
-        top.addSpacing(6)
+        top.addWidget(self.btn_version)
+        top.addSpacing(4)
         top.addWidget(self.input, 1)
+        top.addWidget(self.btn_context)
         top.addWidget(self.btn_query)
         top.addSpacing(18)
         top.addWidget(self.btn_import)
@@ -874,32 +1140,96 @@ class MainWindow(QMainWindow):
         top.addWidget(self.btn_format_help)
         top.addWidget(self.btn_backup)
         top.addWidget(self.btn_settings)
-        root.addLayout(top)
+        root.addWidget(bar)
 
     def _build_splitter(self) -> QSplitter:
-        """左栏与详情区分列，比例 3:5。"""
+        """左栏与内容区分列，比例 3:5。"""
         self.splitter = QSplitter(Qt.Orientation.Horizontal)
         self.splitter.setChildrenCollapsible(False)
         self.splitter.setHandleWidth(10)
         self.splitter.addWidget(self._build_left_panel())
-        self.splitter.addWidget(self._build_detail_panel())
+        self.splitter.addWidget(self._build_content_stack())
         self.splitter.setStretchFactor(0, 3)
         self.splitter.setStretchFactor(1, 5)
         self.splitter.setSizes([350, 690])
         return self.splitter
+
+    def _build_content_stack(self) -> QWidget:
+        """右侧内容区：详情、统计两页常驻，复习页按需挂上来。
+
+        复习页不预先建：它的队列在构造时就从库里取到期词，常驻一个实例意味着
+        用户第二次进来看到的是上一次的队列。改成每次进入时新建，代价是一次
+        构造，换来的是「点进来看到的永远是当下到期的词」。
+        """
+        self.content = QStackedWidget()
+        self.content.addWidget(self._build_detail_panel())
+        self.stats = StatsPanel(self.repo, self._theme, self.config, self)
+        self.content.addWidget(self.stats)
+        return self.content
 
     def _build_left_panel(self) -> QWidget:
         left = QWidget()
         left_layout = QVBoxLayout(left)
         left_layout.setContentsMargins(0, 0, 0, 0)
         left_layout.setSpacing(8)
-        left_layout.addLayout(self._build_mode_row())
-        left_layout.addLayout(self._build_review_row())
-        left_layout.addLayout(self._build_filter_row())
-        left_layout.addWidget(self._build_tag_row())
-        left_layout.addWidget(self._build_list(), 1)
-        left_layout.addWidget(self._build_count_label())
+        # 显式顶部对齐。列表在复习 / 统计页会被藏起来，那一栏只剩这个条，
+        # 而 Qt 会把没有可拉伸项的布局按剩余空间摊开，三个分段于是漂在中间。
+        left_layout.addWidget(
+            self._build_page_bar(), 0, Qt.AlignmentFlag.AlignTop
+        )
+
+        # 列表与筛选整包进一个容器：切到复习或统计时要把它们一起藏起来，
+        # 而分段留在原地。逐个 `setVisible` 得记住七个子控件，漏一个就会在
+        # 复习页上留一条孤零零的筛选框。
+        self._left_body = QWidget()
+        body = QVBoxLayout(self._left_body)
+        body.setContentsMargins(0, 0, 0, 0)
+        body.setSpacing(8)
+        body.addLayout(self._build_mode_row())
+        body.addLayout(self._build_review_row())
+        body.addLayout(self._build_filter_row())
+        body.addLayout(self._build_state_row())
+        body.addWidget(self._build_tag_row())
+        body.addWidget(self._build_list(), 1)
+        body.addWidget(self._build_count_label())
+        left_layout.addWidget(self._left_body, 1)
         return left
+
+    def _build_page_bar(self) -> QWidget:
+        """左栏顶部的三页分段：生词本 / 复习 / 统计。
+
+        与下面的 `#mode`（生词本 / 词组收藏）是两层：上层换页，下层换集合。
+        两者都用 `setAutoExclusive`，而 Qt 的互斥范围是**同一个父控件**——
+        所以这一组必须有自己的父容器，和 `#mode` 那组分开；放在同一个父里，
+        点「复习」会把「词组收藏」的选中态一起清掉。
+        """
+        bar = QWidget()
+        # 高度钉住。下面的列表在复习/统计页会隐藏，那一栏只剩这个条，
+        # 若不限高它会跟着布局被拉满，三个分段于是漂在左栏正中间。
+        bar.setFixedHeight(36)
+        layout = QHBoxLayout(bar)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(4)
+
+        self.btn_page_words = QPushButton("生词本")
+        self.btn_page_review = QPushButton("复习")
+        self.btn_page_stats = QPushButton("统计")
+        for button in (self.btn_page_words, self.btn_page_review, self.btn_page_stats):
+            button.setObjectName("page")
+            button.setCheckable(True)
+            button.setAutoExclusive(True)
+            button.setCursor(Qt.CursorShape.PointingHandCursor)
+            layout.addWidget(button, 1)
+
+        self.btn_page_words.setToolTip("词条列表与详情")
+        self.btn_page_review.setToolTip("到期的词逐条复习，评分推进记忆计划")
+        self.btn_page_stats.setToolTip("生词规模、近七天新增与使用报告入口")
+        self.btn_page_words.setChecked(True)
+
+        self.btn_page_words.clicked.connect(lambda: self._show_page(PAGE_WORDS))
+        self.btn_page_review.clicked.connect(lambda: self._show_page(PAGE_REVIEW))
+        self.btn_page_stats.clicked.connect(lambda: self._show_page(PAGE_STATS))
+        return bar
 
     def _build_mode_row(self) -> QHBoxLayout:
         """「生词本 / 词组收藏」切换。两个可勾选按钮，而不是 QTabBar。
@@ -978,6 +1308,36 @@ class MainWindow(QMainWindow):
         filter_row.addWidget(self.order)
         return filter_row
 
+    def _build_state_row(self) -> QHBoxLayout:
+        """学习状态与词性两个下拉，各占半行。
+
+        **为什么是下拉而不是 chip**：与标签行同一条理由（左栏宽度固定，
+        chip 排不下只能裁剪或横向滚动，而裁剪等于让某些选项无声消失）。
+        两个条件都是有限的枚举，下拉是这里唯一不需要取舍的形态。
+
+        词性下拉的选项**从库里现算**（`_refresh_pos_filter`），不写死
+        adj./n./v. 那一套：库里有什么词性就列什么，用户看不到自己一条都
+        筛不出来的选项。
+        """
+        self.state_filter = QComboBox()
+        self.state_filter.setToolTip(
+            "按学习进度筛选：到期待复习、还没复习过、或者已经记牢（间隔超过三周）"
+        )
+        for key in (STATE_ALL, STATE_DUE, STATE_NEW, STATE_MASTERED, STATE_ARCHIVED):
+            self.state_filter.addItem(STATE_LABELS[key], key)
+        self.state_filter.setMinimumWidth(96)
+
+        self.pos_filter = QComboBox()
+        self.pos_filter.setToolTip("按词性筛选；与搜索、标签、学习状态同时生效")
+        self.pos_filter.addItem("全部词性", "")
+        self.pos_filter.setMinimumWidth(86)
+
+        row = QHBoxLayout()
+        row.setSpacing(6)
+        row.addWidget(self.state_filter, 1)
+        row.addWidget(self.pos_filter, 1)
+        return row
+
     def _build_tag_row(self) -> QWidget:
         """标签筛选。做成一行的下拉而不是一排 chip。
 
@@ -1020,14 +1380,16 @@ class MainWindow(QMainWindow):
         return self.count_label
 
     def _build_detail_panel(self) -> QFrame:
-        panel = QFrame()
-        panel.setObjectName("panel")
-        panel_layout = QVBoxLayout(panel)
+        # 存一份引用：切页时要 `setCurrentWidget`，而它是堆栈里的一页，
+        # 从内容区反查父控件既绕又容易拿到包装对象。
+        self.detail_panel = QFrame()
+        self.detail_panel.setObjectName("panel")
+        panel_layout = QVBoxLayout(self.detail_panel)
         panel_layout.setContentsMargins(1, 1, 1, 1)
         self.detail = EntryDetail()
         self.detail.set_networked(self._is_networked())
         panel_layout.addWidget(self.detail)
-        return panel
+        return self.detail_panel
 
     def _build_status_bar(self) -> None:
         """接入状态常驻右下角，撤销按钮也在这里。
@@ -1044,6 +1406,20 @@ class MainWindow(QMainWindow):
         self.btn_undo.setToolTip("把刚刚删掉的那条放回去（词条含备注与标签，词组含简释与例句）")
         self.btn_undo.setVisible(False)
         self.statusBar().addPermanentWidget(self.btn_undo)
+
+        # 「有新版本」只在真发现新版时才出现。做成状态栏上的一个可点按钮而不是
+        # 弹窗：更新是「知道一下就行」的信息，不该打断用户正在做的事。
+        #
+        # 用 `#statusButton` 而不是带 `<a>` 的 QLabel：QLabel 的链接颜色只能靠
+        # 富文本内联写，而那正是「界面代码里不许出现字面颜色」这条约定要防的东西
+        # （内联色在深色主题下必然有一处失效）。这个 objectName 的样式表是透明的。
+        self.update_label = QPushButton()
+        self.update_label.setObjectName("statusButton")
+        self.update_label.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.update_label.setVisible(False)
+        self.update_label.clicked.connect(self._open_update_page)
+        self._update_info = None
+        self.statusBar().addPermanentWidget(self.update_label)
 
         self.mode_label = QLabel()
         self.mode_label.setObjectName("muted")
@@ -1074,8 +1450,18 @@ class MainWindow(QMainWindow):
         self.btn_settings.clicked.connect(self._open_settings)
 
         self.list.currentItemChanged.connect(self._on_item_changed)
-        self.detail.synonymClicked.connect(self._lookup_word)
+        self.list.verticalScrollBar().valueChanged.connect(self._on_list_scrolled)
+        self.btn_context.toggled.connect(self._on_context_toggled)
+        self.state_filter.currentIndexChanged.connect(self._on_state_filter_changed)
+        self.pos_filter.currentIndexChanged.connect(self._on_pos_filter_changed)
+        self.detail.speakRequested.connect(self._speak)
+        # 点同义语 chip 是「再查一下这个词」，不带语境：用户点的是词本身，
+        # 不是「把刚才那段话套到这个词上」。
+        self.detail.synonymClicked.connect(
+            lambda w: self._lookup_word(w, context="")
+        )
         self.detail.refreshRequested.connect(self._refresh_word)
+        self.detail.restoreRequested.connect(self._restore_entry)
         self.detail.deleteRequested.connect(self._request_delete)
         self.detail.noteChanged.connect(self._on_note_changed)
         self.detail.tagsChanged.connect(self._on_tags_changed)
@@ -1087,7 +1473,8 @@ class MainWindow(QMainWindow):
         self.btn_mode_phrases.clicked.connect(
             lambda _=False: self._switch_mode(MODE_PHRASES)
         )
-        self.btn_review.clicked.connect(self._open_review)
+        # 「待复习」不再是弹窗，而是切到复习页：同一个入口，两种深度。
+        self.btn_review.clicked.connect(lambda: self._show_page(PAGE_REVIEW))
         self.btn_refresh_all.clicked.connect(self._do_refresh_all)
 
         # 输入即搜，但需要防抖，避免每个字符都打一次数据库
@@ -1175,72 +1562,129 @@ class MainWindow(QMainWindow):
         self.btn_review.setVisible(True)
         self.btn_review.setText(f"待复习 {self.repo.due_count(review.now_timestamp())}")
 
-    def _open_review(self) -> None:
-        """打开复习会话；关闭后刷新待复习数。
+    def _show_page(self, page: str) -> None:
+        """切到某一页。顶部分段与「待复习」按钮都走这里。
 
-        先把手上的备注 / 标签落库：会话是模态的，虽然它只写复习列、不碰内容，
-        但「进一个会写库的模态框之前先把待写值落库」是一以贯之的姿势——否则
-        用户可能带着未保存的编辑进会话，出来后那条编辑的落库时机就悬了。
+        顺序有讲究：先结算上一页的复习成绩，再切控件。反过来的话，切到统计页
+        时 `_teardown_review` 触发的那次列表重载会落在已经隐藏的左栏上，
+        多刷一遍而已，但「复习中间那几个词算不算进统计」会因此取决于点击顺序。
+        """
+        if page != PAGE_REVIEW:
+            self._teardown_review()
+        self._page = page
+        # 筛选与列表只在生词本页有意义。把它们留在复习页上，用户会以为筛选
+        # 还能用，而它筛的是一栏看不见的东西。
+        self._left_body.setVisible(page == PAGE_WORDS)
+        # 复习与统计是整页内容，左栏留下分段就够。收窄之后内容区拿回宽度，
+        # 而分段仍然在原地，一眼就知道怎么回去。
+        self.splitter.setSizes([200, 840] if page != PAGE_WORDS else [350, 690])
+        if page == PAGE_REVIEW:
+            self._open_review()
+            return
+        if page == PAGE_STATS:
+            self.stats.refresh()
+            self.content.setCurrentWidget(self.stats)
+            return
+        self.content.setCurrentWidget(self.detail_panel)
+
+    def _open_review(self) -> None:
+        """进入复习页，按**当下**到期的词排一轮队。
+
+        先把手上的备注 / 标签落库：复习页会重建列表与详情，待写的编辑若还挂在
+        防抖定时器上，就再也没有机会写回去了。
+
+        每次进来都新建实例而不是复用一个：队列是构造时从库里取的，复用会让
+        第二次进来看到上一次的队列——用户在别处查了几个词，回头复习却排不上。
         """
         self._flush_edits()
-        started = time.monotonic()
-        dialog = ReviewDialog(self.repo, self._theme, parent=self)
-        dialog.exec()
-        # 时长含「打开但一个都没评」的整段停留时间，所以只有真评过才记：
-        # 记了没评的那次，会把「平均一轮复习多久」拉得毫无意义。
-        graded = dialog.graded()
+        self._review_started = time.monotonic()
+        dialog = ReviewDialog(
+            self.repo, self._theme, parent=self.content, embedded=True
+        )
+        # 「返回生词本」走与顶部分段相同的一条路：点按钮而不是直接改控件，
+        # 这样分段上的选中态由 Qt 的互斥组自己纠正，不必再同步一遍。
+        dialog.leaveRequested.connect(self.btn_page_words.click)
+        self.review = dialog
+        self.content.addWidget(dialog)
+        self.content.setCurrentWidget(dialog)
+
+    def _teardown_review(self) -> None:
+        """结算并销毁复习页。没有实例时什么都不做。"""
+        dialog = self.review
+        if dialog is None:
+            return
+        self.review = None
+        self._finish_review(dialog, getattr(self, "_review_started", time.monotonic()))
+        self.content.removeWidget(dialog)
+        dialog.deleteLater()
+
+    def _finish_review(self, dialog: ReviewDialog, started: float) -> None:
+        """把这一轮的成绩记进统计，并刷新受影响的界面。
+
+        时长含「进来但一个都没评」的整段停留时间，所以只有真评过才记：记了
+        没评的那次，会把「平均一轮复习多久」拉得毫无意义。
+
+        `graded` 是 property 不是方法。这里早先写成了 `dialog.graded()`，
+        于是每完成一次复习都在槽函数里抛 TypeError：统计不记、角标不刷、
+        引导那一步不推进，而 PySide6 只会把 traceback 打到 stderr，界面上
+        一切正常，所以它一直没被发现。
+        """
+        graded = dialog.graded
         if graded:
             analytics.record_event(
                 "review_completed",
                 {
                     "count": int(graded),
                     "duration_ms": int(max(0.0, time.monotonic() - started) * 1000),
-                    # 四档分布。没有它就只能知道「评了几条」，调不了 SM-2 的
-                    # 间隔与难度系数——全评「记住了」和半数「忘了」的会话
-                    # 在原来的记录里长得一模一样。
+                    # 三档分布 + 归档数。没有分布就只能知道「评了几条」，
+                    # 调不了 SM-2 的间隔与难度系数——全评「记住了」和半数
+                    # 「忘了」的会话在原来的记录里长得一模一样。
                     **dialog.ratings(),
+                    "archived": int(dialog.archived),
                 },
             )
         # 会话里评过分，到期集合变了，按钮上的数字要跟着刷新。
         self._refresh_review_count()
+        # 复习里可能把词判成了「太简单」，它们已经从生词本移走：列表、状态
+        # 计数、标签与词性下拉都要跟着变，否则用户离开复习页还能在列表里看到
+        # 刚刚移走的那个词。
+        self._refresh_state_filter()
+        self._reload_list()
+        self._practice_after_review(graded)
 
     def _current_entries(self, *, unlimited: bool = False) -> list[Entry]:
-        """列表与导出共用同一数据源，保证「所见即所导」。
+        """当前这一屏该显示的**全部**词条（不做渲染截断）。
 
-        但**上限不共用**：列表设上限是为界面性能（超出时计数标签会明确写出
-        「已显示 N 条 · 共 M 条」），导出若沿用同一上限，打印稿会被静默截断，
-        而文件头还自称「共 N 条」。因此导出传 unlimited=True。
+        列表与导出共用这一份数据源，保证「所见即所导」。`unlimited` 参数留着
+        只为兼容导出侧的调用点：列表改成按需加载之后，这里本来就不设上限
+        ——旧版本用一个硬上限保护渲染性能，代价是「第 1001 条之后永远看不见」。
 
-        标签筛选与搜索框是**与**的关系：两个条件同时生效。它们各自单独占满
-        列表的场景很好想，但真正会发生的是「我要在这个标签里找那个词」——
-        若后一个条件把前一个顶掉，用户会以为标签被清空了。
+        四个筛选条件是**与**的关系：搜索框、标签、学习状态、词性。它们各自单独
+        占满列表的场景很好想，但真正会发生的是「我要在这个标签里找那个词」——
+        若后一个条件把前一个顶掉，用户会以为前一个被清空了。
         """
-        cap = None if unlimited else LIST_LIMIT
         query = self.filter.text().strip()
         if self._mode == MODE_PHRASES:
             # 词组走同一条「所见即所导」的路：这里返回的也是 `Entry`（由
             # `Phrase.to_entry()` 适配），因此列表卡片、导出、格式说明样例
             # 一个分支都不用再写。**排序与筛选也从这里分派**，不另开一条。
+            #
+            # 学习状态与词性对词组不适用：phrases 表没有 review_* 列，词组
+            # 也没有词性这回事。那两个条件在这里刻意不参与。
             return [
                 item.to_entry()
                 for item in self.repo.search_phrases(
-                    query, order=self.order.currentData(), limit=cap
+                    query, order=self.order.currentData(), limit=None
                 )
             ]
-        if self._tag_filter:
-            tagged = self.repo.list_by_tag(
-                self._tag_filter, order=self.order.currentData()
-            )
-            if query:
-                # 交集按 id 取。文字检索走 FTS（含大小写折叠、词形归并），
-                # 不能用 `in` 去比字符串——那样「Ubiquitous」与「ubiquitous」
-                # 会被判成两个不同的词条。
-                hit_ids = {entry.id for entry in self.repo.search(query, limit=None)}
-                tagged = [entry for entry in tagged if entry.id in hit_ids]
-            return tagged if cap is None else tagged[:cap]
-        if query:
-            return self.repo.search(query, limit=cap)
-        return self.repo.list_entries(order=self.order.currentData(), limit=cap)
+        return self.repo.query_entries(
+            order=str(self.order.currentData() or "recent"),
+            state=self._state_filter,
+            pos=self._pos_filter,
+            tag=self._tag_filter,
+            keyword=query,
+            now=review.now_timestamp(),
+        )
 
     @staticmethod
     def _list_text(entry: Entry) -> str:
@@ -1257,8 +1701,13 @@ class MainWindow(QMainWindow):
         return f"{entry.lemma}  ·  {gloss}" if gloss else entry.lemma
 
     def _reload_list(self, select_id: int | None = None) -> None:
-        query = self.filter.text().strip()
-        entries = self._current_entries()
+        """重算「这一屏该有哪些词条」，并画出第一页。
+
+        **查询与渲染分开**：`_current_entries` 给出完整结果（可能是几万条），
+        而这里只把前 `LIST_PAGE` 条变成控件。滚动到底时 `_on_list_scrolled`
+        接着画下一段，所以列表不再有上限。
+        """
+        self._visible_entries = self._current_entries()
         phrases_mode = self._mode == MODE_PHRASES
 
         self.list.blockSignals(True)
@@ -1266,55 +1715,186 @@ class MainWindow(QMainWindow):
         # clear() 已把旧卡片一并销毁，这里必须把引用放掉：持着已删除的卡片去
         # set_selected 会抛 RuntimeError，而「删掉一条 → 重载列表」正好必经此处。
         self._selected_card = None
-        for entry in entries:
-            item = QListWidgetItem(self._list_text(entry))
-            item.setData(_USER_ROLE, entry.id)
-            item.setToolTip(entry.definition_zh or entry.definition_en)
-            # 行高与卡片同高：卡片由 setItemWidget 铺满项矩形，行高给错就会被压扁
-            item.setSizeHint(QSize(0, EntryCard.HEIGHT))
-            self.list.addItem(item)
-            card = EntryCard(entry)
-            # 卡片长什么样是共用的，**但删除落到哪张表必须分派**：词条与词组
-            # 是两张各自从 1 发号的表，拿词组的 id 去删词条会安静地删掉别人。
-            if phrases_mode:
-                card.deleteRequested.connect(self._request_phrase_delete)
-            else:
-                card.deleteRequested.connect(self._request_delete)
-            self.list.setItemWidget(item, card)
         self.list.blockSignals(False)
-
-        total = self.repo.count_phrases() if phrases_mode else self.repo.count()
-        shown = len(entries)
-        if shown >= LIST_LIMIT:
-            self.count_label.setText(
-                f"已显示 {shown} 条 · 共 {total} 条 · 请用搜索缩小范围"
-            )
-        elif query or (self._tag_filter and not phrases_mode):
-            self.count_label.setText(f"匹配 {shown} 条 · 共 {total} 条")
-        else:
-            self.count_label.setText(f"共 {total} 条")
+        self._rendered = 0
+        self._append_rows(LIST_PAGE)
+        # 第一页填不满可视区时滚动条的最大值还是 0，滚动事件永远不会来，
+        # 剩下的词就再也画不出来。这里补到「出现滚动条」或「没有更多」为止。
+        self._fill_viewport()
+        self._update_count_label()
 
         # 切换按钮上的条数要跟着这次重载走（这一次的数据才是刚查出来的）
         self._sync_mode_buttons()
         # 「待复习」条数同理：查词、导入、删除、撤销、评分都会改它，每次重载重算。
         self._refresh_review_count()
 
-        # 标签筛选只对词条有意义——词组没有标签。切到词组模式时必须把它藏掉，
-        # 否则那一行会永远显示「全部标签」，一个只有一项的下拉就是在占位。
+        # 标签与两个筛选下拉只对词条有意义——词组没有标签、没有词性、没有
+        # 复习状态。切到词组模式时必须把它们藏掉，否则那一行会永远显示
+        # 「全部标签」，一个只有一项的下拉就是在占位。
         if phrases_mode:
             self.tag_row.setVisible(False)
+            self.state_filter.setVisible(False)
+            self.pos_filter.setVisible(False)
         else:
-            # 标签下拉放在最后重建：它会读库（tag_counts），而上面那些步骤才是
-            # 「这一屏该显示什么」的判据来源。顺序反过来的话，删掉最后一条带某标签
-            # 的词条时，下拉里那个标签会先消失、列表随后才重排，中间那一瞬的界面
-            # 自相矛盾（下拉显示「全部标签」而列表还是空的）。
+            # 下拉放在最后重建：它们会读库（tag_counts / pos_counts / 状态计数），
+            # 而上面那些步骤才是「这一屏该显示什么」的判据来源。顺序反过来的话，
+            # 删掉最后一条带某标签的词条时，下拉里那个标签会先消失、列表随后才
+            # 重排，中间那一瞬的界面自相矛盾（下拉显示「全部标签」而列表还是空的）。
+            self.state_filter.setVisible(True)
+            self.pos_filter.setVisible(True)
+            self._refresh_state_filter()
+            self._refresh_pos_filter()
             self._refresh_tag_filter()
 
         if select_id is not None:
+            self._select_row(select_id)
+
+    def _append_rows(self, count: int) -> int:
+        """把接下来 `count` 条变控件，返回这次实际新增的行数。
+
+        `_loading_more` 是重入闸：`addItem` 会挪动滚动条，滚动条变化又会触发
+        `_on_list_scrolled`——不挡的话一次滑动能连锁补好几页，表现是「一碰滚轮
+        就卡一下」。
+        """
+        if self._loading_more:
+            return 0
+        start = self._rendered
+        end = min(start + max(0, int(count)), len(self._visible_entries))
+        if end <= start:
+            return 0
+        phrases_mode = self._mode == MODE_PHRASES
+
+        self._loading_more = True
+        self.list.blockSignals(True)
+        try:
+            for entry in self._visible_entries[start:end]:
+                item = QListWidgetItem(self._list_text(entry))
+                item.setData(_USER_ROLE, entry.id)
+                item.setToolTip(entry.definition_zh or entry.definition_en)
+                # 行高与卡片同高：卡片由 setItemWidget 铺满项矩形，行高给错就会被压扁
+                item.setSizeHint(QSize(0, EntryCard.HEIGHT))
+                self.list.addItem(item)
+                card = EntryCard(entry)
+                # 卡片长什么样是共用的，**但删除落到哪张表必须分派**：词条与词组
+                # 是两张各自从 1 发号的表，拿词组的 id 去删词条会安静地删掉别人。
+                if phrases_mode:
+                    card.deleteRequested.connect(self._request_phrase_delete)
+                else:
+                    card.deleteRequested.connect(self._request_delete)
+                self.list.setItemWidget(item, card)
+        finally:
+            self.list.blockSignals(False)
+            self._loading_more = False
+        self._rendered = end
+        return end - start
+
+    def _fill_viewport(self) -> None:
+        """首屏填不满时继续补页，直到出现滚动条或者没有更多。
+
+        上限 20 页（`LIST_PAGE × 20`）是防呆：窗口被拉到极高、或者每行特别矮时，
+        理论上可以一直补下去。真要一屏装下四千条，那也不是补能解决的问题。
+        """
+        for _ in range(20):
+            if self._rendered >= len(self._visible_entries):
+                return
+            if self.list.verticalScrollBar().maximum() > 0:
+                return
+            if not self._append_rows(LIST_PAGE):
+                return
+
+    def _on_list_scrolled(self, value: int) -> None:
+        """滚到离底部 `LIST_PREFETCH` 像素以内时补下一页。"""
+        if self._loading_more or self._rendered >= len(self._visible_entries):
+            return
+        bar = self.list.verticalScrollBar()
+        if bar.maximum() - value > LIST_PREFETCH:
+            return
+        if self._append_rows(LIST_PAGE):
+            self._update_count_label()
+
+    def _update_count_label(self) -> None:
+        """计数标签：说清「匹配多少 / 总共多少 / 已经画了多少」。
+
+        「已显示 N 条」只在**没画完**时出现。画完了还挂一句「已显示 3200 条」
+        会让用户以为还有更多没显示——而那正是旧版本那句「已显示 1000 条 ·
+        请用搜索缩小范围」给人的错觉。
+        """
+        phrases_mode = self._mode == MODE_PHRASES
+        total = self.repo.count_phrases() if phrases_mode else self.repo.count()
+        shown = len(self._visible_entries)
+        filtered = bool(
+            self.filter.text().strip()
+            or (not phrases_mode and (self._tag_filter or self._state_filter or self._pos_filter))
+        )
+        text = f"匹配 {shown} 条 · 共 {total} 条" if filtered else f"共 {total} 条"
+        if self._rendered < shown:
+            text += f" · 已显示 {self._rendered} 条"
+        self.count_label.setText(text)
+
+    def _select_row(self, entry_id: int) -> None:
+        """选中某一行。它可能还没被画出来（在第 N 页之后），那就先补到它。"""
+        for _ in range(200):
             for i in range(self.list.count()):
-                if self.list.item(i).data(_USER_ROLE) == select_id:
+                if self.list.item(i).data(_USER_ROLE) == entry_id:
                     self.list.setCurrentRow(i)
                     return
+            if self._rendered >= len(self._visible_entries):
+                return
+            if not self._append_rows(LIST_PAGE):
+                return
+
+    def _refresh_state_filter(self) -> None:
+        """在学习状态下拉里补上条数。
+
+        与标签下拉同款：每次重载都重算，不做增量维护。条数会在查词、导入、删除、
+        撤销、评分之后变化，增量维护要在每一处补一句，漏一处只是「数字不对」。
+
+        重建的是**文案**不是选项：四个状态是固定枚举，永远都在。选中项保持不变
+        ——「到期待复习」筛出来是 0 条时把它自己重置成「全部」，用户会以为筛选
+        被他点掉了。
+        """
+        counts = self.repo.state_counts(review.now_timestamp())
+        self.state_filter.blockSignals(True)
+        for key in (STATE_ALL, STATE_DUE, STATE_NEW, STATE_MASTERED, STATE_ARCHIVED):
+            index = self.state_filter.findData(key)
+            if index < 0:
+                continue
+            count = counts.get(key, 0)
+            label = STATE_LABELS[key]
+            self.state_filter.setItemText(index, f"{label} {count}" if count else label)
+        self.state_filter.blockSignals(False)
+
+    def _refresh_pos_filter(self) -> None:
+        """按库里的词性重建下拉，规则与 `_refresh_tag_filter` 相同。
+
+        词性来自 `split_pos`（唯一一份解析），所以「adj., n.」这样的多词性
+        词条会同时出现在两个选项里——这是对的：按 adj 筛应当能筛到它。
+        """
+        counts = self.repo.pos_counts()
+        self.pos_filter.blockSignals(True)
+        self.pos_filter.clear()
+        self.pos_filter.addItem("全部词性", "")
+        for key, count in counts:
+            self.pos_filter.addItem(f"{pos_label(key)} {count}", key)
+        index = self.pos_filter.findData(self._pos_filter)
+        # 正在筛的词性没了（最后一条带它的词条被删了或改了词性）：筛选必须跟着
+        # 撤销，否则列表永远空着而下拉显示「全部词性」。
+        if index < 0:
+            self._pos_filter = ""
+            index = 0
+        self.pos_filter.setCurrentIndex(index)
+        self.pos_filter.blockSignals(False)
+        self.pos_filter.setVisible(bool(counts))
+
+    def _on_state_filter_changed(self, _index: int) -> None:
+        self._flush_edits()
+        self._state_filter = str(self.state_filter.currentData() or "")
+        self._reload_list()
+
+    def _on_pos_filter_changed(self, _index: int) -> None:
+        self._flush_edits()
+        self._pos_filter = str(self.pos_filter.currentData() or "")
+        self._reload_list()
 
     def _refresh_tag_filter(self) -> None:
         """按库里的标签重建筛选下拉。
@@ -1621,11 +2201,11 @@ class MainWindow(QMainWindow):
         repo = self.repo.clone()
         return DictionaryService(repo, self.service.provider), repo
 
-    def _worker_lookup(self, word: str):
+    def _worker_lookup(self, word: str, context: str = ""):
         """后台线程里的查词。连接用完必须关，否则每查一次开一条。"""
         service, repo = self._worker_service()
         try:
-            return service.lookup(word)
+            return service.lookup(word, context=context)
         finally:
             repo.close()
 
@@ -1652,19 +2232,67 @@ class MainWindow(QMainWindow):
         finally:
             repo.close()
 
-    def _lookup_word(self, word: str) -> None:
+    def _lookup_word(self, word: str, context: str | None = None) -> None:
+        """查一个词。`context` 为 None 时取语境框里的内容。
+
+        显式传空串与不传是两件事：从同义语 chip 点进来的查词不该顺着语境框
+        走——用户点的是「再查一下这个词」，不是「按刚才那段话再解释一次」。
+        所以调用方想不带语境就必须明说 `context=""`。
+        """
         # 查询会切换当前词条，压在内存里的备注先落盘，否则会丢
         self._flush_edits()
+        snippet = self._current_context() if context is None else context
+        self._lookup_context = snippet
         self._begin_timing("lookup")
         seq = self._next_seq()
-        self._set_busy(True, f"正在查询「{word}」…")
+        self._set_busy(
+            True,
+            f"正在按语境查询「{word}」…" if snippet else f"正在查询「{word}」…",
+        )
         submit(
             self._worker_lookup,
             word,
+            snippet,
             on_success=lambda result, s=seq: self._on_lookup_ok(result, s),
             on_error=lambda message, kind, s=seq: self._on_error(message, kind, s),
             on_finished=lambda s=seq: self._finish_content(s),
         )
+
+    def _current_context(self) -> str:
+        """语境框里现在这段话。收起、隐藏、为空时都返回空串。"""
+        panel = getattr(self, "context_panel", None)
+        if panel is None or not panel.isVisible():
+            return ""
+        return self.context_edit.toPlainText().strip()
+
+    def _on_context_toggled(self, checked: bool) -> None:
+        self.context_panel.setVisible(bool(checked))
+        if checked:
+            self.context_edit.setFocus()
+
+    def _sync_context_available(self) -> None:
+        """按当前来源决定语境入口在不在。
+
+        离线词库与示例模式给不出「这段话里指什么」，入口就直接不出现——让用户
+        贴一段话、然后拿到一条与那段话无关的释义，比没有这个入口更糟。
+
+        切回接口后要重新显示，所以这里不缓存判断结果，每次调用现问 provider。
+        """
+        ok = self.service.supports_context()
+        self.btn_context.setVisible(ok)
+        if not ok:
+            self.btn_context.setChecked(False)
+            self.context_panel.setVisible(False)
+            self.context_edit.clear()
+
+    def _speak(self, word: str) -> None:
+        """朗读一个词。失败时说明一句，不弹窗。
+
+        系统没有语音包这件事在启动时已经探测过（喇叭按钮根本不会出现），
+        走到这里的失败只可能是朗读本身出错——一次朗读失败不值得打断查词。
+        """
+        if not speech_speaker().say(word):
+            self.statusBar().showMessage("系统语音这次没能朗读，可以稍后再点一次", 4000)
 
     def _phrase_blocked_reason(self) -> str:
         """当前来源给不出词组时返回一句说明，否则返回空串。
@@ -1847,7 +2475,15 @@ class MainWindow(QMainWindow):
                 "word_added", {"source_type": self._pending_source}
             )
         self._pending_source = "manual"
-        self._present_entry(entry, self._origin_of(entry, cached), saved=not cached)
+        self._present_entry(
+            entry,
+            self._origin_of(entry, cached),
+            saved=not cached,
+            context_used=bool(self._lookup_context),
+        )
+        # 首启引导的第一步：用户真的查到了一个词。放在呈现之后而不是发起请求时，
+        # 因为失败的那一次不该把引导推进到「去看详情」——详情里什么都没有。
+        self._practice_after_lookup()
 
     @staticmethod
     def _origin_of(entry, cached: bool) -> str:
@@ -1879,12 +2515,22 @@ class MainWindow(QMainWindow):
             return
         self._present_entry(entry, "已重新查询并更新")
 
-    def _present_entry(self, entry, origin: str, *, saved: bool | None = None) -> None:
+    def _present_entry(
+        self,
+        entry,
+        origin: str,
+        *,
+        saved: bool | None = None,
+        context_used: bool = False,
+    ) -> None:
         """把查到的词条呈现到界面（两个入口共用，避免呈现逻辑各自漂移）。
 
         `saved` 回答「这一次有没有真的写进库」：True 是新写入，False 是命中缓存
         或重查（库里的那条本来就在）。None 表示这个入口不弹回执。判据由调用方
         给，不在这里猜——只有它知道 `lookup()` 返回的 `cached` 是真是假。
+
+        `context_used` 只影响状态栏那一句：用户贴了上下文却拿到一条没有语境
+        解释的结果时必须说出来，否则他会以为模型读过那段话、只是没什么可说的。
         """
         self.input.clear()
         # 查词的结果属于生词本。若用户此刻正在看词组收藏，先切回去：否则会出现
@@ -1908,6 +2554,10 @@ class MainWindow(QMainWindow):
         if missing:
             self.statusBar().showMessage(
                 f"{entry.lemma} — {origin}，但缺少{'、'.join(missing)}"
+            )
+        elif context_used and not (entry.contextual_meaning or "").strip():
+            self.statusBar().showMessage(
+                f"{entry.lemma} — {origin}，这次没有给出语境解释"
             )
         else:
             self.statusBar().showMessage(f"{entry.lemma} — {origin}")
@@ -2200,6 +2850,31 @@ class MainWindow(QMainWindow):
         )
 
     # ---------- 词条操作 ----------
+
+    def _restore_entry(self, entry_id: int) -> None:
+        """把归档的词放回生词本。推迟一拍再动手，理由同 `_request_delete`：
+        重建列表会销毁此刻正压在处理栈上的那个按钮。"""
+        QTimer.singleShot(0, lambda: self._do_restore(entry_id))
+
+    def _do_restore(self, entry_id: int) -> None:
+        entry = self.repo.get_by_id(entry_id)
+        if entry is None:
+            return
+        # 先落库压在输入框里的备注：它一旦写进去，这条词就已经被 upsert
+        # 写活了（见 `Repository._update_row`），不必再走 unarchive。
+        self._flush_edits()
+        entry = self.repo.get_by_id(entry_id)
+        if entry is None:
+            return
+        if entry.archived_at and not self.repo.unarchive(entry_id, datetime.now()):
+            return
+        self.statusBar().showMessage(f"「{entry.lemma}」已放回生词本", 4000)
+        # 当前筛「已归档」时，放回去的词会立刻从这一屏消失。切回全部状态更贴合
+        # 意图：用户刚说「这个词我还要」，下一步通常就是在生词本里看它。
+        if self._state_filter == STATE_ARCHIVED:
+            self.state_filter.setCurrentIndex(self.state_filter.findData(STATE_ALL))
+        else:
+            self._reload_list(select_id=entry_id)
 
     def _request_delete(self, entry_id: int) -> None:
         """删除请求的统一入口：推迟到本轮事件处理结束，再真正执行。
@@ -2973,19 +3648,31 @@ class MainWindow(QMainWindow):
             return
 
         query = self.filter.text().strip()
-        dialog = ExportDialog(total, filtered=bool(query), parent=self)
+        dialog = ExportDialog(
+            total,
+            filtered=bool(query),
+            last_export_at=str(self.config.get("last_export_at") or ""),
+            # 日期区间的默认起点取库里最早那条：用户多半是要「从头导一遍」，
+            # 默认给今天的话他得自己往回拨半年。
+            earliest="" if phrases_mode else self.repo.earliest_created(),
+            can_filter_by_date=not phrases_mode,
+            parent=self,
+        )
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
 
         entries = self._collect_export_entries(dialog, query)
         if not entries:
-            QMessageBox.information(self, "导出", "当前没有可导出的内容。")
+            QMessageBox.information(
+                self, "导出", "这个范围里没有词条，换个范围试试。"
+            )
             return
         # 导出以字母序排版，便于打印后查阅；列表顺序是浏览用的，不适用于纸质版
         entries = sorted(entries, key=lambda item: item.lemma.lower())
 
         default_title = "词组收藏" if phrases_mode else "英语生词本"
-        title = f"{default_title}（筛选：{query}）" if query else default_title
+        scope_note = self._export_scope_note(dialog, query)
+        title = default_title + (f"（{scope_note}）" if scope_note else "")
         key, label, _hint, ext = next(
             (k, lab, h, e) for k, lab, h, e in EXPORT_FORMATS if k == dialog.format_key
         )
@@ -2993,26 +3680,54 @@ class MainWindow(QMainWindow):
         path = self._ask_export_path(key, label, default_title, ext)
         if not path:
             return
-        if not self._write_export_guarded(key, entries, title, path):
-            return
-
-        # 格式与条数足够判断「哪种导出真有人用」，路径与文件名不进统计。
-        analytics.record_event(
-            "export_completed", {"format": key, "count": len(entries)}
-        )
-        self.statusBar().showMessage(f"已导出 {len(entries)} 条")
-        self._offer_open_export(key, entries, query, path)
+        self._start_export(key, entries, title, path, scope_note)
 
     def _collect_export_entries(
         self, dialog: ExportDialog, query: str
     ) -> list[Entry]:
-        """按对话框选定的范围取词条。"""
-        entries = self._current_entries(unlimited=dialog.unlimited)
-        if dialog.filtered_only and query:
-            # 对话框里选的是「跟随当前筛选」，而 `_current_entries` 本来就跟随
-            # 筛选框，这里无需额外过滤；保留分支是为了将来「筛选外的范围」扩展。
-            entries = [e for e in entries if e.lemma]
-        return entries
+        """按对话框选定的范围取词条。
+
+        「全部」必须真的**绕开筛选框**：它早先和「跟随当前筛选」共用
+        `_current_entries`，于是搜索框里留着上次的关键字时，选「全部（200 条）」
+        只会导出 3 条，而对话框上的数字写着 200。那条数字是 `repo.count()`，
+        本来就是全库口径，两边不一致本身就是证据。
+        """
+        scope = dialog.scope_key
+        phrases_mode = self._mode == MODE_PHRASES
+        if scope == "range":
+            start = f"{dialog.date_from_text} 00:00:00"
+            end = f"{dialog.date_to_text} 23:59:59"
+            if start > end:
+                # 起止写反了：换过来而不是报错。这是明显的手误，按用户显然
+                # 想要的区间给结果，比让他改一遍再点一次导出更省事。
+                start = f"{dialog.date_to_text} 00:00:00"
+                end = f"{dialog.date_from_text} 23:59:59"
+            return self.repo.entries_added_between(start, end)
+        if scope == "since_last":
+            since = str(self.config.get("last_export_at") or "")
+            if not since:
+                return []
+            return self.repo.entries_added_between(since, strict_start=True)
+        if scope == "filtered":
+            return self._current_entries(unlimited=True)
+        if phrases_mode:
+            return [item.to_entry() for item in self.repo.list_phrases(limit=None)]
+        return self.repo.list_entries(limit=None)
+
+    def _export_scope_note(self, dialog: ExportDialog, query: str) -> str:
+        """范围的简短说法，写进标题与完成提示，便于事后分清哪份是哪份。
+
+        不带括号：调用方要拼进「（…）」里，也要单独塞进「已导出 N 条（…）到」，
+        让这里统一去掉外层括号，两处就不必各剥一次。
+        """
+        scope = dialog.scope_key
+        if scope == "filtered" and query:
+            return f"筛选：{query}"
+        if scope == "range":
+            return f"{dialog.date_from_text} 至 {dialog.date_to_text}"
+        if scope == "since_last":
+            return "自上次导出以来"
+        return ""
 
     def _ask_export_path(
         self, key: str, label: str, default_title: str, ext: str
@@ -3038,22 +3753,92 @@ class MainWindow(QMainWindow):
         )
         return path
 
-    def _write_export_guarded(
-        self, key: str, entries: list[Entry], title: str, path: str
-    ) -> bool:
-        """写盘并把两种已知失败就地说明。返回是否写成功。"""
+    def _start_export(
+        self, key: str, entries: list[Entry], title: str, path: str, scope_note: str
+    ) -> None:
+        """把写盘交给后台线程，先给一个「在干活」的可见状态。
+
+        **为什么必须移出 UI 线程**：取数与排版都在这条路径上（PDF 尤其重，几百条
+        要在 QTextDocument 里排一遍），而它此前是同步跑的——条数一多，窗口就整段
+        时间不响应，用户点哪里都没反应，看起来像卡死。
+
+        进度条而不是模态框：导出没有「取消到一半」这种有意义的中间态（文件可能
+        已经写了一半），弹一个带取消按钮的进度框等于给出一个假选项。所以用状态栏
+        一句话 + 等待光标，导出按钮先禁用，避免连点两次写同一个文件。
+        """
+        self.btn_export.setEnabled(False)
+        self.statusBar().showMessage(f"正在导出 {len(entries)} 条…")
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        submit(
+            self._worker_export,
+            key,
+            entries,
+            title,
+            Path(path),
+            on_success=lambda result: self._on_export_done(
+                key, entries, path, scope_note, result
+            ),
+            on_error=lambda message, _kind: self._on_export_failed(path, message),
+            on_finished=self._finish_export,
+        )
+
+    @staticmethod
+    def _worker_export(key: str, entries: list[Entry], title: str, path: Path) -> tuple:
+        """后台线程里写文件，返回 `(错误类别, 说明)`；成功时是 `("", "")`。
+
+        **异常在这里被吃掉并转成值**：`OversizedFile` / `PdfFontUnavailable` /
+        `OSError` 要给出三种完全不同的说法，而 worker 的失败回调只传得回一句话，
+        类型信息在跨线程那一刻就丢了。转成元组之后，主线程还能按类别分派文案。
+        """
         try:
-            self._write_export(key, entries, title, Path(path))
-        except OSError as exc:
-            QMessageBox.warning(self, "导出失败", f"无法写入文件：{exc}")
-            return False
+            MainWindow._write_export(key, entries, title, path)
         except PdfFontUnavailable as exc:
-            # 字体缺失时程序不会静默产出一份通篇方块的 PDF，而是走到这里。
-            # 这条消息必须说清「是环境的问题、不是你的词条有问题」，否则用户
-            # 会开始怀疑数据。
-            QMessageBox.warning(self, "无法导出 PDF", str(exc))
-            return False
-        return True
+            return ("pdf_font", str(exc))
+        except OSError as exc:
+            return ("io", str(exc))
+        except Exception as exc:  # noqa: BLE001 - 导出失败不该让程序崩
+            return ("other", str(exc) or exc.__class__.__name__)
+        return ("", "")
+
+    def _finish_export(self) -> None:
+        QApplication.restoreOverrideCursor()
+        self.btn_export.setEnabled(True)
+
+    def _on_export_done(
+        self, key: str, entries: list[Entry], path: str, scope_note: str, result
+    ) -> None:
+        kind, message = result if isinstance(result, tuple) else ("other", "")
+        if kind:
+            self._on_export_failed(path, message, kind=kind)
+            return
+        # 格式与条数足够判断「哪种导出真有人用」，路径与文件名不进统计。
+        analytics.record_event(
+            "export_completed", {"format": key, "count": len(entries)}
+        )
+        # 「自上次导出以来」的锚点在这里推进，而不是在发起导出时：写盘失败
+        # 也算导出过的话，那批词下次就再也导不出来了。
+        #
+        # 锚点取完成时刻，与本次覆盖的范围无关。所以只导了 9 月那一批时，
+        # 中间几个月的新词不在这次文件里，却又被锚点挡在下次「自上次导出以来」
+        # 之外——这一点必须在完成提示里说出来，否则用户会以为已经导全了。
+        self.config["last_export_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        save_config(self.config)
+        self.statusBar().showMessage(f"已导出 {len(entries)} 条")
+        self._offer_open_export(key, entries, scope_note, path)
+
+    def _on_export_failed(self, path: str, message: str, kind: str = "") -> None:
+        """把写盘失败就地说明。三类原因各有各的说法。
+
+        字体缺失那条必须说清「是环境的问题、不是你的词条有问题」，否则用户
+        会开始怀疑数据——而数据一个字都没错。
+        """
+        if kind == "pdf_font":
+            QMessageBox.warning(self, "无法导出 PDF", message)
+        elif kind == "io" or not kind:
+            QMessageBox.warning(self, "导出失败", f"无法写入文件：{message}")
+        else:
+            QMessageBox.warning(self, "导出失败", message)
+        self.statusBar().showMessage("导出失败", 5000)
 
     def _export_extra_note(self, key: str) -> str:
         """完成提示里的格式说明，按格式各说一句它会损失什么。"""
@@ -3078,10 +3863,14 @@ class MainWindow(QMainWindow):
         return ""
 
     def _offer_open_export(
-        self, key: str, entries: list[Entry], query: str, path: str
+        self, key: str, entries: list[Entry], scope_note: str, path: str
     ) -> None:
-        scope = "（当前筛选结果）" if query else ""
+        scope = f"（{scope_note}）" if scope_note else ""
         extra = self._export_extra_note(key)
+        extra += (
+            "\n\n已记下这次导出的时刻，下次选「自上次导出以来」只会拿到"
+            "此刻之后新加的词。"
+        )
         if (
             QMessageBox.question(
                 self,
@@ -3094,12 +3883,16 @@ class MainWindow(QMainWindow):
         ):
             QDesktopServices.openUrl(QUrl.fromLocalFile(path))
 
-    def _write_export(self, key: str, entries: list[Entry], title: str, path: Path) -> None:
+    @staticmethod
+    def _write_export(key: str, entries: list[Entry], title: str, path: Path) -> None:
         """把选定格式写到磁盘。**统一用 `utf-8` 编码**：
 
         `export_csv` 的返回值自带 BOM，所以这里不需要（也不该）用 `utf-8-sig`
         ——两处都加 BOM 会写出两个。把这件事收在一个函数里，就不存在
         「这个分支记得加、那个分支忘了加」的问题。
+
+        静态方法而不是实例方法：它不碰窗口上任何状态，而导出路径现在跑在
+        后台线程里，拿 `self` 过去等于把一个主线程对象交给另一个线程。
         """
         if key == "pdf":
             export_pdf(entries, path, title)
@@ -3298,6 +4091,9 @@ class MainWindow(QMainWindow):
         # 详情面板的「出路」文案取决于是否联网，切模式后必须同步，
         # 否则会沿用上一次的说法（离线内容让你去切接口模式，而你现在就在接口模式）
         self.detail.set_networked(self._is_networked())
+        # 语境入口同理，而且判据更细：接口模式下没填密钥会退回离线，那时
+        # 语境入口也不该在（`supports_context()` 读的是真实生效的 provider）。
+        self._sync_context_available()
         self._refresh_mode_label()
         # 背景图跟着配置走。加载失败要如实说出来——一句「设置已保存」会让用户
         # 以为背景换上了，然后对着一张没变化的窗口反复改设置。

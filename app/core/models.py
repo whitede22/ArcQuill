@@ -57,6 +57,46 @@ def join_tags(value: object) -> str:
     return " ".join(split_tags(value))
 
 
+# 词性的分隔符。与标签同款问题：`pos` 是模型返回的自由文本，可能写成
+# "adj."、"n., v."、"adv/adj"，而按词性筛选必须能精确对上。
+#
+# **解析只在这里做一份**，三个消费方共用：筛选项的构建、筛选时的比较、
+# 以及卡片上「这个词有几个词性」的判断。三处各写一份的话，某处忘了处理斜杠，
+# 用户就会看到「下拉里有 v，点开却是空的」。
+_POS_SEP_RE = re.compile(r"[,，/;；、\s]+")
+
+
+def pos_key(value: str) -> str:
+    """单个词性的规范形态：小写、去尾部句点。`Adj.` 与 `adj` 都是 `adj`。"""
+    return (value or "").strip().lower().rstrip(".")
+
+
+def pos_label(key: str) -> str:
+    """把规范形态还原成界面用语：`adj` → `adj.`。
+
+    库里存的多半带点（模型按提示词返回 `adj.`），补回去读起来才像词典；
+    而比较一律用 `pos_key`，不拿带点的字符串去比——那会让 `adj` 与 `adj.`
+    成为两个不同的筛选项，各自只匹配到一部分词条。
+    """
+    key = (key or "").strip()
+    return f"{key}." if key and not key.endswith(".") else key
+
+
+def split_pos(value: object) -> list[str]:
+    """把一个词条的 `pos` 拆成规范化的词性键列表，去重保序。
+
+    `"adj., n."` → `["adj", "n"]`；空串或非字符串 → `[]`。
+    """
+    if not isinstance(value, str):
+        return []
+    out: list[str] = []
+    for part in _POS_SEP_RE.split(value):
+        key = pos_key(part)
+        if key and key not in out:
+            out.append(key)
+    return out
+
+
 def _json_list(raw: object) -> list:
     """把「一串列表形态的东西」规整成 list。**坏输入一律当空，绝不抛**。
 
@@ -271,6 +311,12 @@ class Entry:
     example_zh: str = ""
     synonyms: list[Synonym] = field(default_factory=list)
     collocations: list[Collocation] = field(default_factory=list)
+    # 用户贴了一段上下文时，模型在这一处语境下的具体含义。
+    # 空串表示「这次没有语境」，与「模型没给」在界面上是同一种呈现（不渲染那一块），
+    # 因为它本来就是可选能力：离线词库与示例模式结构上都没有。
+    contextual_meaning: str = ""
+    # 使用注意：语域、常用句型、易错点。同样由模型写，与用户写的 `notes` 分开。
+    usage_note: str = ""
     notes: str = ""
     tags: str = ""
     source: str = ""
@@ -295,6 +341,10 @@ class Entry:
     review_count: int = 0
     review_interval: float = 0.0
     review_ease: float = 2.5
+    # 归档时间。空串＝还在生词本里；非空＝复习时判过「太简单」，移出列表与
+    # 复习队列但不删数据。`from_payload` 不读它：这个词条是模型生成的，
+    # 归不归档是用户的选择，模型无从决定。
+    archived_at: str = ""
 
     @staticmethod
     def now() -> str:
@@ -374,6 +424,13 @@ class Entry:
             example_zh=row["example_zh"],
             synonyms=syns,
             collocations=colls,
+            # 与 collocations_json 同款：Entry.from_row 也会吃到补列之前的旧行
+            # （备份快照、迁移中途的库），列不存在时按空串处理，不能让
+            # `row["contextual_meaning"]` 直接抛 IndexError。
+            contextual_meaning=row["contextual_meaning"]
+            if "contextual_meaning" in keys
+            else "",
+            usage_note=row["usage_note"] if "usage_note" in keys else "",
             notes=row["notes"],
             tags=row["tags"],
             source=row["source"],
@@ -386,6 +443,7 @@ class Entry:
             review_count=int(row["review_count"] or 0) if "review_count" in keys else 0,
             review_interval=float(row["review_interval"] or 0) if "review_interval" in keys else 0.0,
             review_ease=float(row["review_ease"] or 2.5) if "review_ease" in keys else 2.5,
+            archived_at=row["archived_at"] if "archived_at" in keys else "",
         )
 
     @classmethod
@@ -395,6 +453,20 @@ class Entry:
         colls = [
             c for c in (Collocation.from_raw(x) for x in _json_list(payload.get("collocations"))) if c
         ]
+
+        def _text(*keys: str) -> str:
+            """取第一个有内容的字符串字段。
+
+            `contextual_meaning` / `usage_note` 是 v3 新加的，模型可能用别的键名
+            返回（`context_meaning`、`usage` 之类），只认一种写法会把内容整块丢掉，
+            而且不报错——界面上只是那块不出现。
+            """
+            for key in keys:
+                value = payload.get(key)
+                if isinstance(value, str) and value.strip():
+                    return " ".join(value.split()) if key == "usage_note" else value.strip()
+            return ""
+
         return cls(
             lemma=str(payload.get("lemma") or "").strip(),
             phonetic=str(payload.get("phonetic") or "").strip(),
@@ -407,4 +479,8 @@ class Entry:
             # 与同义语同一个上限思路：多出来的不是「更全」，而是详情面板被撑爆。
             # 提示词要的是 3–5 条，模型给 12 条时按前 5 条收。
             collocations=colls[:5],
+            contextual_meaning=_text(
+                "contextual_meaning", "context_meaning", "meaning_in_context"
+            ),
+            usage_note=_text("usage_note", "usage", "usage_notes"),
         )

@@ -19,11 +19,12 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QDate, Qt
 from PySide6.QtWidgets import (
-    QCheckBox,
+    QDateEdit,
     QDialog,
     QDialogButtonBox,
+    QHBoxLayout,
     QLabel,
     QPlainTextEdit,
     QRadioButton,
@@ -135,12 +136,26 @@ def format_samples() -> dict[str, str]:
 
 
 class ExportDialog(QDialog):
-    """选导出格式与范围。属性 `format_key` / `unlimited` 是选择结果。"""
+    """选导出格式与范围。
 
-    def __init__(self, total: int, filtered: bool, parent=None) -> None:
+    范围有四种，各自独立成一档单选：全部、跟随当前筛选、自上次导出以来、
+    按添加日期。`scope_key` 给出选中的那一档，`date_from` / `date_to` 只在
+    「按添加日期」下有值。
+    """
+
+    def __init__(
+        self,
+        total: int,
+        filtered: bool,
+        *,
+        last_export_at: str = "",
+        earliest: str = "",
+        can_filter_by_date: bool = True,
+        parent=None,
+    ) -> None:
         super().__init__(parent)
         self.setWindowTitle("导出")
-        self.setMinimumWidth(430)
+        self.setMinimumWidth(470)
 
         layout = QVBoxLayout(self)
         layout.setSpacing(8)
@@ -171,6 +186,12 @@ class ExportDialog(QDialog):
 
         self.scope_all = QRadioButton(f"全部（{total} 条）")
         self.scope_limited = QRadioButton("跟随当前筛选")
+        self.scope_since = QRadioButton(
+            f"自上次导出以来（{last_export_at[:16]} 之后）"
+            if last_export_at
+            else "自上次导出以来（还没有导出过）"
+        )
+        self.scope_range = QRadioButton("按添加日期")
         self.scope_all.setChecked(True)
         layout.addWidget(self.scope_all)
         # 筛选不生效时把它置灰，而不是让用户勾一个没用的选项——
@@ -180,13 +201,48 @@ class ExportDialog(QDialog):
             self.scope_limited.setEnabled(False)
             self.scope_limited.setText("跟随当前筛选（当前没有筛选）")
 
-        layout.addSpacing(6)
-        self.unlimited_check = QCheckBox("不受列表显示上限约束（推荐）")
-        self.unlimited_check.setChecked(True)
-        self.unlimited_check.setToolTip(
-            "列表为流畅只显示前若干条；导出默认取全部，避免打印稿少掉一截。"
+        # 「自上次导出以来」在第一次导出时没有锚点。置灰而不是让它退化成
+        # 「全部」：用户勾了它，以为自己导的是增量，实际拿了整份。
+        layout.addWidget(self.scope_since)
+        if not last_export_at:
+            self.scope_since.setEnabled(False)
+            self.scope_since.setToolTip("还没有导出过，没有「上次」可以对照")
+
+        layout.addWidget(self.scope_range)
+
+        # 日期区间紧跟在它自己的单选下面，缩进对齐到文字起点。
+        date_row = QHBoxLayout()
+        date_row.setContentsMargins(22, 0, 0, 0)
+        date_row.setSpacing(6)
+        self.date_from = QDateEdit()
+        self.date_to = QDateEdit()
+        for edit in (self.date_from, self.date_to):
+            edit.setDisplayFormat("yyyy-MM-dd")
+            edit.setCalendarPopup(True)
+            edit.setEnabled(False)
+        self.date_from.setDate(_parse_date(earliest) or QDate.currentDate())
+        self.date_to.setDate(QDate.currentDate())
+        date_row.addWidget(self.date_from)
+        date_row.addWidget(QLabel("至"))
+        date_row.addWidget(self.date_to)
+        date_row.addStretch(1)
+        layout.addLayout(date_row)
+
+        # 只有选了「按添加日期」才让两个日期可用。默认禁用是必要的：不解禁用
+        # 户会去改它们，然后发现改了没效果——因为他勾的是「全部」。
+        self.scope_range.toggled.connect(
+            lambda on: [
+                edit.setEnabled(on) for edit in (self.date_from, self.date_to)
+            ]
         )
-        layout.addWidget(self.unlimited_check)
+
+        # 词组模式没有「按添加日期」这一档：那个需求说的是「导出单词表，
+        # 别把已经背过的再导一遍」，词组收藏是另一套数据，混进同一个日期
+        # 分档只会让人以为能按词组的学习进度筛。
+        if not can_filter_by_date:
+            for radio in (self.scope_since, self.scope_range):
+                radio.setEnabled(False)
+                radio.setToolTip("词组收藏不支持按日期导出")
 
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
@@ -205,12 +261,40 @@ class ExportDialog(QDialog):
         return EXPORT_FORMATS[0][0]
 
     @property
-    def unlimited(self) -> bool:
-        return self.unlimited_check.isChecked()
+    def scope_key(self) -> str:
+        """选中的范围：`all` / `filtered` / `since_last` / `range`。"""
+        if self.scope_limited.isChecked():
+            return "filtered"
+        if self.scope_since.isChecked():
+            return "since_last"
+        if self.scope_range.isChecked():
+            return "range"
+        return "all"
 
     @property
     def filtered_only(self) -> bool:
         return self.scope_limited.isChecked()
+
+    @property
+    def date_from_text(self) -> str:
+        return self.date_from.date().toString("yyyy-MM-dd")
+
+    @property
+    def date_to_text(self) -> str:
+        return self.date_to.date().toString("yyyy-MM-dd")
+
+
+def _parse_date(raw: str) -> QDate | None:
+    """把 `created_at` 那种 'YYYY-MM-DD HH:MM:SS' 截成 QDate。
+
+    解析失败返回 None，由调用方退回「今天」——这个值是日期的**默认值**，
+    读不懂时给一个能用的大致范围，比抛异常让对话框打不开好。
+    """
+    text = (raw or "").strip()[:10]
+    if len(text) != 10:
+        return None
+    date = QDate.fromString(text, "yyyy-MM-dd")
+    return date if date.isValid() else None
 
 
 class FormatHelpDialog(QDialog):

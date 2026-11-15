@@ -31,6 +31,8 @@ SCENES: tuple[tuple[str, str, str], ...] = (
     ("10-fallback", "fallback", ""),
     ("11-night-lookup", "main", "night"),
     ("12-night-settings", "settings", "night"),
+    ("13-changelog", "changelog", ""),
+    ("14-stats", "stats", ""),
 )
 
 

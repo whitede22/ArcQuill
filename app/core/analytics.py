@@ -92,8 +92,13 @@ EVENTS: dict[str, dict[str, str]] = {
     },
     # 新增一个词条。source_type 区分手输、导入、剪贴板。
     "word_added": {"source_type": _SOURCE},
-    # 复习完一轮。四档计数是 SM-2 参数的唯一依据：只知道「评了几条」，
-    # 调不了间隔与难度系数。
+    # 复习完一轮。三档计数是 SM-2 参数的唯一依据：只知道「评了几条」，
+    # 调不了间隔与难度系数。`archived` 是「太简单」移出生词本的条数，
+    # 它与评分分布分开记：归档不是记忆评分，混进去会把「不用学」算成
+    # 「记得特别牢」，SM-2 参数就跟着被带偏。
+    #
+    # `easy` 保留在允许列表里，只是为了读得懂旧库里那批事件——v1.6 起
+    # 不再产生它（「太简单」改走归档）。
     "review_completed": {
         "count": _COUNT,
         "duration_ms": _DURATION,
@@ -101,6 +106,7 @@ EVENTS: dict[str, dict[str, str]] = {
         "fuzzy": _COUNT,
         "remembered": _COUNT,
         "easy": _COUNT,
+        "archived": _COUNT,
     },
     # 导入收尾。count 是实际写库条数，不含跳过。
     "import_completed": {"count": _COUNT, "success": _FLAG},

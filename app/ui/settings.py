@@ -34,7 +34,8 @@ from .background import BackgroundRenderer
 from .consent import ConsentDialog
 from .hotkey import HOTKEY_TEXT
 from .hotkey import available as hotkey_available
-from .report_dialog import ReportDialog
+from .report_flow import ReportActions
+from .workers import submit
 from .theme import (
     BG_VEIL_DEFAULT,
     THEME_DEFAULT,
@@ -43,7 +44,6 @@ from .theme import (
     theme_ids,
     veil_level,
 )
-from .workers import submit
 
 # 可选的背景图格式。列出来的都是 Qt 自带 imageformats 插件能解的格式——
 # 写成「所有文件」会让用户选中一个 .psd 然后得到一张空白背景，而界面上不会
@@ -91,6 +91,20 @@ class SettingsDialog(QDialog):
         # 提交在后台线程跑，期间禁用按钮，避免连点发出多封邮件。
         self._report_sending = False
         self._report_btn: QPushButton | None = None
+        # 保存与提交的实现住在 report_flow 里，统计页用的是同一份。
+        # 主题在报告对话框弹出那一刻才定，这里先留空串占位。
+        # 「记录是否开启」取界面上那个复选框的**当前**状态：取消勾选但还没保存时，
+        # 提交就该被拦下，而 config 里存的仍是上一次保存的值。
+        self._report_actions = ReportActions(
+            self,
+            self._config,
+            "",
+            analytics_enabled=lambda: bool(
+                getattr(self, "analytics", None) is not None
+                and self.analytics.isChecked()
+            ),
+        )
+        self._report_actions.busy_changed.connect(self._on_report_busy)
         self._build_provider_fields(config, api_key)
         form = self._build_form(config)
         offline_hint, storage = self._build_storage_notes()
@@ -172,7 +186,7 @@ class SettingsDialog(QDialog):
         return form
 
     def _build_switches(self, config: dict) -> None:
-        """两个行为开关：接口兜底与托盘常驻。"""
+        """三个行为开关：接口兜底、托盘常驻、检查更新。"""
         self.fallback = QCheckBox("接口请求失败时，自动改用离线词库")
         self.fallback.setChecked(bool(config.get("offline_fallback", True)))
         self.fallback.setToolTip(
@@ -197,6 +211,16 @@ class SettingsDialog(QDialog):
             self.tray.setEnabled(False)
             self.tray.setText("关闭窗口后留在托盘（仅 Windows 支持全局热键）")
             self.tray.setToolTip("当前平台没有系统级热键，关闭窗口即退出程序。")
+
+        # 检查更新。默认开，但它确实是本程序**唯一**会主动发出的网络请求
+        # （查词只在用户按回车时才出去），所以必须给一个关掉的地方，并写清
+        # 「发出去的是什么」——不写的话用户只能靠猜。
+        self.check_updates = QCheckBox("启动时检查有没有新版本")
+        self.check_updates.setChecked(bool(config.get("check_updates", True)))
+        self.check_updates.setToolTip(
+            "只向 GitHub 的公开接口读一次「最新版本号」。\n"
+            "不发送任何使用数据、不发送设备信息，关掉之后程序完全不联网（除非你查词）。"
+        )
 
     def _build_analytics(self, config: dict) -> None:
         """使用统计的开关与四个次要入口。
@@ -424,6 +448,7 @@ class SettingsDialog(QDialog):
         left.addWidget(hint)
         left.addWidget(self.fallback)
         left.addWidget(self.tray)
+        left.addWidget(self.check_updates)
         left.addStretch(1)
 
         right = QVBoxLayout()
@@ -478,114 +503,18 @@ class SettingsDialog(QDialog):
         QMessageBox.information(self, "使用统计", "\n".join(lines))
 
     def _export_report(self) -> None:
-        payload = report.build_report(30)
-        dialog = ReportDialog(self._current_theme(), payload, self, mode="save")
-        if dialog.exec() and dialog.saved_path:
-            QMessageBox.information(
-                self, "使用报告", f"已保存到：\n{dialog.saved_path}"
-            )
+        self._report_actions.save(self._current_theme())
 
     def _submit_report(self) -> None:
-        # 提交是第二个独立决定：统计开着也不代表愿意发出去，所以这里不默认放行。
-        if not self.analytics.isChecked():
-            QMessageBox.information(
-                self,
-                "提交使用报告",
-                "提交之前先勾选「在这台电脑上记录使用情况」。\n"
-                "记录与提交是两个决定，程序不替你合并。",
-            )
+        self._report_actions.submit(self._current_theme())
+
+    def _on_report_busy(self, busy: bool) -> None:
+        """发送期间锁住按钮，避免连点发出多封邮件。"""
+        self._report_sending = busy
+        if self._report_btn is None:
             return
-        if self._report_sending:
-            QMessageBox.information(
-                self, "提交使用报告", "上一份报告还在发送，等它结束再点。"
-            )
-            return
-        payload = report.build_report(30)
-        if not payload.get("event_total"):
-            QMessageBox.information(
-                self, "提交使用报告", "还没有记录到事件，暂时没有可提交的内容。"
-            )
-            return
-        if not report.endpoint():
-            # 地址没配就没必要让用户填一遍表单再看失败。
-            if self._ask_github("这个版本还没有配置提交地址，报告可以改用 GitHub 提交。"):
-                QDesktopServices.openUrl(QUrl(report.issue_url(payload)))
-            return
-        dialog = ReportDialog(
-            self._current_theme(),
-            payload,
-            self,
-            mode="submit",
-            submitter=str(self._config.get("report_name") or ""),
-        )
-        if not (dialog.exec() and dialog.saved_path):
-            return
-        self._remember_name(dialog.submitter)
-        self._start_sending(payload, dialog.saved_path)
-
-    def _remember_name(self, name: str) -> None:
-        """把署名记进配置，下次预填。
-
-        直接落盘，不等设置页的「保存」：用户提交完通常就关窗口了，等不到他
-        再去点一次保存。这份写入只覆盖署名一个键，设置页里尚未保存的其他改动
-        仍然按原样留在表单里。
-        """
-        self._config["report_name"] = name
-        cfg = load_config()
-        cfg["report_name"] = name
-        save_config(cfg)
-
-    def _start_sending(self, payload: dict, path: Path) -> None:
-        """提交要过网络，不能占着主线程，否则界面在等待期间完全不响应。"""
-        self._report_sending = True
-        if self._report_btn is not None:
-            self._report_btn.setEnabled(False)
-            self._report_btn.setText("提交中…")
-        submit(
-            report.submit,
-            payload,
-            on_success=lambda _: self._report_sent(path),
-            on_error=lambda message, kind: self._report_failed(message, path, payload),
-            on_finished=self._reset_report_button,
-        )
-
-    def _reset_report_button(self) -> None:
-        self._report_sending = False
-        if self._report_btn is not None:
-            self._report_btn.setEnabled(True)
-            self._report_btn.setText("提交报告")
-
-    def _report_sent(self, path: Path) -> None:
-        QMessageBox.information(
-            self,
-            "提交使用报告",
-            f"报告已发出。\n\n本机留了一份：\n{path}\n不需要的话可以删掉。",
-        )
-
-    def _report_failed(self, message: str, path: Path, payload: dict) -> None:
-        """发不出去时把话说清楚，并留一条备用通道。
-
-        报告已经落盘，所以失败不是白干；把 GitHub 那条路摆在按钮上，
-        比让用户自己去项目主页找入口强。
-        """
-        detail = f"{message}\n\n报告已保存在：\n{path}"
-        if self._ask_github("报告没有发出去。", detail):
-            QDesktopServices.openUrl(QUrl(report.issue_url(payload)))
-
-    def _ask_github(self, text: str, detail: str = "") -> bool:
-        """问一句要不要改用 GitHub 提交，返回用户的选择。"""
-        box = QMessageBox(self)
-        box.setWindowTitle("提交使用报告")
-        box.setIcon(
-            QMessageBox.Icon.Warning if detail else QMessageBox.Icon.Information
-        )
-        box.setText(text)
-        if detail:
-            box.setInformativeText(detail)
-        github = box.addButton("改用 GitHub 提交", QMessageBox.ButtonRole.ActionRole)
-        box.addButton("知道了", QMessageBox.ButtonRole.RejectRole)
-        box.exec()
-        return box.clickedButton() is github
+        self._report_btn.setEnabled(not busy)
+        self._report_btn.setText("提交中…" if busy else "提交报告")
 
     def _clear_stats(self) -> None:
         if not analytics.total():
@@ -1013,6 +942,7 @@ class SettingsDialog(QDialog):
         self._config["model"] = self.model.text().strip()
         self._config["offline_fallback"] = self.fallback.isChecked()
         self._config["tray_enabled"] = self.tray.isChecked()
+        self._config["check_updates"] = self.check_updates.isChecked()
         # 统计开关被改动过，就算用户已经就这件事表过态。否则「在设置里关掉、
         # 重启后又被问一次要不要参与」——那等于程序没把他的选择当选择。
         _was_enabled = bool(self._config.get("analytics_enabled", False))

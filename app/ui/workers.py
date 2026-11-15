@@ -50,13 +50,32 @@ class Worker(QRunnable):
         try:
             result = self._fn(*self._args, **self._kwargs)
         except Exception as exc:  # noqa: BLE001 - 需把任何异常传回 UI
-            self.signals.failed.emit(
-                str(exc) or exc.__class__.__name__, errors.classify(exc)
+            self._emit(
+                self.signals.failed,
+                str(exc) or exc.__class__.__name__,
+                errors.classify(exc),
             )
         else:
-            self.signals.succeeded.emit(result)
+            self._emit(self.signals.succeeded, result)
         finally:
-            self.signals.finished.emit()
+            self._emit(self.signals.finished)
+
+    @staticmethod
+    def _emit(signal: Signal, *args: Any) -> bool:
+        """发信号；接收方已经不在了就安静地放弃。
+
+        关窗时仍在跑的任务（检查更新、导出、查词）会在主线程回到事件循环**之后**
+        才返回结果，那时 `WorkerSignals` 的宿主对象已被销毁，`emit` 抛
+        `RuntimeError: Signal source has been deleted`。它只发生在退出路径上，
+        没有任何接收者，既不影响结果也不影响数据——但 Qt 会把整段 traceback
+        打到 stderr，看起来像崩溃。所以在这里断掉，而不是在每一个调用点加
+        判断（那样漏掉一处就还会出现一次）。
+        """
+        try:
+            signal.emit(*args)
+            return True
+        except RuntimeError:
+            return False
 
 
 def submit(

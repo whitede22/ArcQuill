@@ -4812,7 +4812,10 @@ def main() -> int:
         f"名表 {theme_meta_mod.VEIL_NAMES} 浅 {tuple(_levels)} "
         f"深 {tuple(_dark_pal['veil']) if _dark_pal else '找不到深色主题'}",
     )
-    _per_level = 9
+    # 每条目标每档一条。12 = 面板 / 列表 / 状态栏 / 裸按钮 / 计数 / 待复习 /
+    # 重查 / 页面分段（选中与未选中）/ 统计卡 / 集合切换（选中与未选中）。
+    # 表里加一条就要改这个数——它存在的意义就是「有人动过这张表」时提醒一句。
+    _per_level = 12
     check(
         "有背景时主要的面半透明，且每个档位各有一条规则（图片才透得上来）",
         len(_bg_surfaces) == _per_level * len(_levels)
@@ -4835,6 +4838,8 @@ def main() -> int:
         "QLabel#countLabel",
         "QPushButton#review",
         "QPushButton#refresh",
+        "QPushButton#page",
+        "QFrame#statCard",
         "QPushButton#mode",
     )
     _veil_missing = [
@@ -4843,7 +4848,7 @@ def main() -> int:
         if not any(f"{sel} {{" in rule for rule in _bg_surfaces)
     ]
     check(
-        "八个「直接压在原图上」的控件都拿到了受控的表面（少一个就有一处看不清）",
+        "十个「直接压在原图上」的控件都拿到了受控的表面（少一个就有一处看不清）",
         not _veil_missing,
         str(_veil_missing),
     )
@@ -6627,6 +6632,10 @@ def main() -> int:
 
     conn.close()
 
+    _check_v15_features(tmpdir)
+    _check_v16_features(tmpdir)
+    _check_v17_features()
+
     print("=" * 56)
     for name in PASSED:
         print(f"  PASS  {name}")
@@ -6727,6 +6736,714 @@ def _uncovered_prefixes(prefixes: tuple[str, ...] | None = None) -> list[str]:
     )
 
 
+def _check_v15_features(tmpdir: Path) -> None:
+    """v1.5 新结构的自查：两列、语境、筛选、版本比较、朗读探测。
+
+    这一段守的是「加了但没通电」那一类缺陷：列建出来了却没写进 `_COLUMNS`、
+    字段解析了却没进 JSON 结构、筛选条件写了却没接在查询上、版本比较写成了
+    字符串比较。四件事的共同点是**都不会报错**，只会在某个用户手里表现为
+    「这一块永远是空的」或「筛出来的条数不对」，而日志里一个字都没有。
+    """
+    # ---- 31. 语境解释、使用注意、筛选与更新检查（v1.5 的新结构） ----
+    #
+    # 这一段守的是「加了但没通电」那一类缺陷：列建出来了却没写进 `_COLUMNS`、
+    # 字段解析了却没进 JSON 结构、筛选条件写了却没接在查询上、版本比较写成了
+    # 字符串比较。四件事的共同点是**都不会报错**，只会在某个用户手里表现为
+    # 「这一块永远是空的」或「筛出来的条数不对」，而日志里一个字都没有。
+    from app.core.db import ENTRIES_ADDED_COLUMNS as _ADDED_COLS  # noqa: PLC0415
+    from app.core.models import pos_label as _pos_label  # noqa: PLC0415
+    from app.core.models import split_pos as _split_pos  # noqa: PLC0415
+    from app.core.repository import (  # noqa: PLC0415
+        STATE_DUE,
+        STATE_MASTERED,
+        STATE_NEW,
+    )
+    from app.core.update import is_newer as _is_newer  # noqa: PLC0415
+    from app.core.update import parse_version as _parse_version  # noqa: PLC0415
+    from app.providers.prompts import CONTEXT_LIMIT as _CTX_LIMIT  # noqa: PLC0415
+    from app.providers.prompts import PROMPT_VERSION as _PV3  # noqa: PLC0415
+    from app.providers.prompts import SYSTEM_PROMPT as _SYS3  # noqa: PLC0415
+    from app.providers.prompts import build_user_prompt as _user_prompt  # noqa: PLC0415
+    from app.providers.prompts import clamp_context as _clamp_ctx  # noqa: PLC0415
+    from datetime import datetime, timedelta  # noqa: PLC0415
+
+    # 两份声明一致。漏一处就分叉：新装好用、老用户的库永远没有这一列。
+    for _col in ("contextual_meaning", "usage_note"):
+        _decl = _ADDED_COLS.get(_col, "").strip()
+        check(
+            f"{_col} 在 DDL 与 ENTRIES_ADDED_COLUMNS 里都有",
+            _col in DDL and bool(_decl),
+            f"登记表={_decl!r}",
+        )
+        # DDL 里列名与类型之间是**对齐空格**，直接拼串比对必然假红。
+        # 两边都把空白归一化再比，比的才是「声明本身一不一样」。
+        _ddl_norm = " ".join(DDL.split())
+        check(
+            f"{_col} 的两份声明是同一个建列串",
+            bool(_decl) and " ".join(f"{_col} {_decl}".split()) in _ddl_norm,
+            f"登记表={_decl!r}",
+        )
+
+    # 旧库补列 + 写读回环。造一个「v1.4 时代建的库」：DDL 里去掉这两行。
+    _ctx_path = tmpdir / "v15cols.db"
+    _ctxconn = connect(_ctx_path)
+    try:
+        _legacy_ddl = DDL
+        for _col in ("contextual_meaning", "usage_note"):
+            _line = next(
+                line for line in _legacy_ddl.splitlines() if line.strip().startswith(_col)
+            )
+            _legacy_ddl = _legacy_ddl.replace(_line + "\n", "")
+        _ctxconn.executescript(_legacy_ddl)
+        _before = {
+            r[1] for r in _ctxconn.execute("PRAGMA table_info(entries)")
+        }
+        check(
+            "旧库确实没有这两列（否则下面的补列断言是空话）",
+            "contextual_meaning" not in _before and "usage_note" not in _before,
+            str(sorted(_before)),
+        )
+        init_db(_ctxconn)
+        _after = {r[1] for r in _ctxconn.execute("PRAGMA table_info(entries)")}
+        check(
+            "旧库经 init_db 后补出了两个新列",
+            "contextual_meaning" in _after and "usage_note" in _after,
+            str(sorted(_after)),
+        )
+        _ctx_repo = Repository(_ctxconn)
+        _ctx_repo.upsert(
+            Entry(
+                lemma="charge",
+                definition_zh="指控；收费",
+                contextual_meaning="这段里指「（法律上的）指控」",
+                usage_note="作「收费」时多接 for；作「指控」时常与 against 连用",
+                pos="n., v.",
+            )
+        )
+        _back = _ctx_repo.get("charge")
+        check(
+            "两个新字段写进去能原样读回来",
+            _back is not None
+            and _back.contextual_meaning.startswith("这段里指")
+            and "against" in _back.usage_note,
+            "" if _back is None else f"{_back.contextual_meaning!r} / {_back.usage_note!r}",
+        )
+        # 重查（不带上下文）不得把上一次的语境解释抹掉——那是用户贴过的那段话
+        # 唯一留下的东西，而界面上没有任何地方能把它重新填回来。
+        _ctx_repo.upsert(
+            Entry(lemma="charge", definition_zh="指控", usage_note="新的一条提醒")
+        )
+        _after_refresh = _ctx_repo.get("charge")
+        check(
+            "重查不带上下文时保留旧的语境解释",
+            _after_refresh is not None
+            and _after_refresh.contextual_meaning.startswith("这段里指"),
+            "" if _after_refresh is None else repr(_after_refresh.contextual_meaning),
+        )
+        check(
+            "重查会更新使用注意（它是模型写的，不归用户所有）",
+            _after_refresh is not None and _after_refresh.usage_note == "新的一条提醒",
+            "" if _after_refresh is None else repr(_after_refresh.usage_note),
+        )
+    finally:
+        _ctxconn.close()
+
+    # 老行（没有这两列）读回来必须是空串而不是抛 IndexError。备份快照、
+    # 迁移中途的库都会走到这条路径。
+    _old = sqlite3.connect(":memory:")
+    _old.row_factory = sqlite3.Row
+    _old.execute(
+        "CREATE TABLE t (id INTEGER, lemma TEXT, phonetic TEXT, pos TEXT, "
+        "definition_en TEXT, definition_zh TEXT, example TEXT, example_zh TEXT, "
+        "synonyms_json TEXT, collocations_json TEXT, notes TEXT, tags TEXT, "
+        "source TEXT, created_at TEXT, updated_at TEXT)"
+    )
+    _old.execute("INSERT INTO t VALUES (1,'x','','','','','','','[]','[]','','','','','')")
+    _old_row = _old.execute("SELECT * FROM t").fetchone()
+    _old.close()
+    try:
+        _old_entry = Entry.from_row(_old_row)
+        _old_ok = _old_entry.contextual_meaning == "" and _old_entry.usage_note == ""
+        _old_why = f"{_old_entry.contextual_meaning!r} / {_old_entry.usage_note!r}"
+    except Exception as exc:  # noqa: BLE001 - 读不出来就是结论
+        _old_ok, _old_why = False, f"{type(exc).__name__}: {exc}"
+    check("缺列的旧行读回来两个字段是空串（不抛）", _old_ok, _old_why)
+
+    # JSON 解析：提示词里的键名与模型可能用的别名都要认。只认一种写法时，
+    # 内容会被**整块丢掉且不报错**，界面上只是那一块不出现。
+    _pay = Entry.from_payload(
+        {
+            "lemma": "charge",
+            "definition_zh": "指控",
+            "contextual_meaning": "这里指刑事指控",
+            "usage_note": "  多用于被动语态  ",
+        }
+    )
+    check(
+        "from_payload 读得出两个新字段",
+        _pay.contextual_meaning == "这里指刑事指控"
+        and _pay.usage_note == "多用于被动语态",
+        f"{_pay.contextual_meaning!r} / {_pay.usage_note!r}",
+    )
+    _alias = Entry.from_payload(
+        {"lemma": "x", "definition_zh": "y", "context_meaning": "别名键", "usage": "别名 键"}
+    )
+    check(
+        "两个新字段的别名键也认得",
+        _alias.contextual_meaning == "别名键" and _alias.usage_note == "别名 键",
+        f"{_alias.contextual_meaning!r} / {_alias.usage_note!r}",
+    )
+
+    # 提示词升到 v3：两个字段必须出现在系统提示与 JSON 结构里，
+    # 否则模型永远不会输出，而解析层写得再全也拿不到东西。
+    check(
+        "提示词要求输出使用注意与语境含义（版本随之推进）",
+        "usage_note" in _SYS3 and "contextual_meaning" in _SYS3 and _PV3 >= 3,
+        f"PROMPT_VERSION={_PV3}",
+    )
+    check(
+        "不带上下文时提示词里不出现语境段",
+        "这段上下文" not in _user_prompt("charge"),
+        _user_prompt("charge")[:40],
+    )
+    check(
+        "带上下文时提示词里带上了那段话",
+        "The charges were dropped" in _user_prompt("charge", "The charges were dropped."),
+    )
+    _long_ctx = _clamp_ctx("x" * (_CTX_LIMIT + 40))
+    check(
+        "超长上下文截到上限并留省略号（不静默截断）",
+        len(_long_ctx) == _CTX_LIMIT + 1 and _long_ctx.endswith("…"),
+        f"len={len(_long_ctx)}",
+    )
+
+    # 带上下文必须**绕过缓存**：库里那条是通用词义，命中缓存等于让用户贴了句子
+    # 却拿到一条与句子无关的解释。
+    class _CtxProvider:
+        name = "openai-compat"
+        supports_context = True
+
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        def lookup(self, word: str, context: str = "") -> Entry:
+            self.calls.append(context)
+            return Entry(
+                lemma=word,
+                definition_zh="通用释义",
+                contextual_meaning="语境里的那一层意思" if context else "",
+            )
+
+    _cache_path = tmpdir / "v15cache.db"
+    _cache_conn = connect(_cache_path)
+    try:
+        init_db(_cache_conn)
+        _provider = _CtxProvider()
+        _svc = DictionaryService(Repository(_cache_conn), _provider)
+        _svc.lookup("ctxword")
+        _svc.lookup("ctxword")
+        check(
+            "不带上下文时第二次查词走缓存（provider 只被调用一次）",
+            len(_provider.calls) == 1,
+            f"调用次数={len(_provider.calls)}",
+        )
+        _with_ctx = _svc.lookup("ctxword", context="He was charged with theft.")
+        check(
+            "带上下文时绕过缓存、重新请求（并拿到语境解释）",
+            len(_provider.calls) == 2 and _with_ctx[1] is False
+            and _with_ctx[0].contextual_meaning != "",
+            f"调用次数={len(_provider.calls)}",
+        )
+        check(
+            "上下文原样送进 provider",
+            _provider.calls[-1] == "He was charged with theft.",
+            repr(_provider.calls[-1]),
+        )
+    finally:
+        _cache_conn.close()
+
+    # 来源不支持语境时（离线词库、示例模式），带上下文的查词仍然要成功，
+    # 只是不把那段话送进去。抛 TypeError 就变成「查询失败」了。
+    class _NoCtxProvider:
+        name = "offline"
+        supports_context = False
+
+        def lookup(self, word: str) -> Entry:  # 注意：不接受第二个参数
+            return Entry(lemma=word, definition_zh="离线释义")
+
+    _plain_path = tmpdir / "v15plain.db"
+    _plain_conn = connect(_plain_path)
+    try:
+        init_db(_plain_conn)
+        _plain_svc = DictionaryService(Repository(_plain_conn), _NoCtxProvider())
+        try:
+            _plain_entry, _ = _plain_svc.lookup("plainword", context="一段没用的上下文")
+            _plain_ok = _plain_entry.contextual_meaning == ""
+            _plain_why = repr(_plain_entry.contextual_meaning)
+        except Exception as exc:  # noqa: BLE001 - 抛出就是「普通查词也被带坏了」
+            _plain_ok, _plain_why = False, f"{type(exc).__name__}: {exc}"
+        check("来源不支持语境时按普通查词处理（不抛、不塞假内容）", _plain_ok, _plain_why)
+        check(
+            "离线来源确实被判定为不支持语境",
+            _plain_svc.supports_context() is False,
+        )
+    finally:
+        _plain_conn.close()
+
+    # 词性解析。筛选项、比较、卡片显示三处共用这一份，写坏了的表现是
+    # 「下拉里有 v，点开却是空的」。
+    check(
+        "split_pos 拆得出多词性",
+        _split_pos("adj., n.") == ["adj", "n"],
+        str(_split_pos("adj., n.")),
+    )
+    check(
+        "split_pos 认斜杠与顿号",
+        _split_pos("adv/adj、v") == ["adv", "adj", "v"],
+        str(_split_pos("adv/adj、v")),
+    )
+    check("pos_label 把规范形态还原成界面写法", _pos_label("adj") == "adj.")
+    check("pos_label 不重复加点", _pos_label("prep.") == "prep.")
+    check("空词性拆成空列表", _split_pos("") == [] and _split_pos(None) == [])
+
+    # 四个筛选条件叠加 + 状态计数与查询口径一致（下拉写 3 条、点开 2 条就是 bug）。
+    _state_path = tmpdir / "v15state.db"
+    _state_conn = connect(_state_path)
+    try:
+        init_db(_state_conn)
+        _sr = Repository(_state_conn)
+        _now_dt = datetime.now()
+        _due = (_now_dt - timedelta(hours=1)).strftime("%Y-%m-%d %H:%M:%S")
+        _later = (_now_dt + timedelta(days=3)).strftime("%Y-%m-%d %H:%M:%S")
+        _mastered = (_now_dt + timedelta(days=40)).strftime("%Y-%m-%d %H:%M:%S")
+        _sr.upsert(
+            Entry(lemma="alpha", definition_zh="第一", pos="n.", tags="考研",
+                  review_due=_due, review_count=0)
+        )
+        _sr.upsert(
+            Entry(lemma="beta", definition_zh="第二", pos="adj.", tags="考研 高频",
+                  review_due=_later, review_count=2, review_interval=5.0)
+        )
+        _sr.upsert(
+            Entry(lemma="gamma", definition_zh="第三", pos="adj., n.", tags="",
+                  review_due=_mastered, review_count=6, review_interval=30.0)
+        )
+        _now = _now_dt.strftime("%Y-%m-%d %H:%M:%S")
+
+        def _lemmas(**kw) -> list[str]:
+            return sorted(
+                e.lemma for e in _sr.query_entries(now=_now, **kw)
+            )
+
+        check("状态筛选：到期待复习", _lemmas(state=STATE_DUE) == ["alpha"], str(_lemmas(state=STATE_DUE)))
+        check("状态筛选：还没复习过", _lemmas(state=STATE_NEW) == ["alpha"], str(_lemmas(state=STATE_NEW)))
+        check("状态筛选：已掌握", _lemmas(state=STATE_MASTERED) == ["gamma"], str(_lemmas(state=STATE_MASTERED)))
+        check("词性筛选：adj 命中两条（含多词性那条）",
+              _lemmas(pos="adj") == ["beta", "gamma"], str(_lemmas(pos="adj")))
+        check("词性与状态叠加",
+              _lemmas(pos="adj", state=STATE_MASTERED) == ["gamma"],
+              str(_lemmas(pos="adj", state=STATE_MASTERED)))
+        check("标签筛选走解析而不是子串（考研不连带考研英语）",
+              _lemmas(tag="考研") == ["alpha", "beta"], str(_lemmas(tag="考研")))
+        check("三个条件同时生效",
+              _lemmas(tag="考研", pos="adj", state="") == ["beta"],
+              str(_lemmas(tag="考研", pos="adj")))
+        _counts = _sr.state_counts(_now)
+        for _key in (STATE_DUE, STATE_NEW, STATE_MASTERED):
+            check(
+                f"状态计数与查询结果口径一致（{_key}）",
+                _counts.get(_key, -1) == len(_lemmas(state=_key)),
+                f"下拉={_counts.get(_key)} 实际={len(_lemmas(state=_key))}",
+            )
+        check(
+            "词性计数把多词性词条计入每一类",
+            dict(_sr.pos_counts()).get("adj") == 2
+            and dict(_sr.pos_counts()).get("n") == 2,
+            str(_sr.pos_counts()),
+        )
+    finally:
+        _state_conn.close()
+
+    # 版本比较。用字符串比的话 1.10.0 会被判成比 1.9.0 旧，而那正是「用户
+    # 永远收不到更新提示」这类问题的来源。
+    check(
+        "版本比较按数字逐位比（1.10 比 1.9 新）",
+        _is_newer("v1.10.0", "1.9.0") and not _is_newer("v1.9.0", "1.10.0"),
+    )
+    check("同版本不算更新", not _is_newer("v1.5.0", "1.5.0"))
+    check("短版本号按 0 补齐（1.5 与 1.5.0 相同）",
+          not _is_newer("1.5", "1.5.0") and not _is_newer("1.5.0", "1.5"))
+    check("认不出的 tag 不当作更新", not _is_newer("nightly", "1.5.0"))
+    check("parse_version 从任意写法里取数字段",
+          _parse_version("release-1.5.0") == (1, 5, 0), str(_parse_version("release-1.5.0")))
+
+    # 朗读能力探测必须**不抛**：它在窗口启动路径上，一次异常就是程序起不来。
+    # 没有语音包的机器上返回 False，界面据此不显示喇叭。
+    from app.core.speech import Speaker as _Speaker  # noqa: PLC0415
+
+    _speaker = _Speaker()
+    try:
+        _speech_ok = isinstance(_speaker.available(), bool)
+    except Exception as exc:  # noqa: BLE001 - 抛了就是「启动会崩」
+        _speech_ok = False
+        _speaker._error = f"{type(exc).__name__}: {exc}"  # noqa: SLF001
+    check("朗读能力探测不抛异常", _speech_ok, _speaker.error)
+    check("空文本不朗读（不会念出一段空气）", _speaker.say("   ") is False)
+    # 「点了没声音」那一版的根因是虚表索引错位：`Speak` 打到了别的槽位上，
+    # 调用返回 S_OK，界面收到成功，一个音都没有。这类失败用返回值判不出来，
+    # 唯一的判据是**引擎真的开始念了**——`WaitUntilDone` 只有真的在念才会阻塞。
+    #
+    # 阈值 50ms：念一个单词的耗时远大于它；而「交出去就返回」的假成功是 0ms。
+    # 没有语音包的机器会跳过这条而不是报红。
+    _spoken_ms = 0
+    if _speaker.available():
+        if _speaker.say("probe"):
+            _spoken_ms = _speaker.wait(3000)
+    check(
+        "朗读真的进了引擎（假成功会在 0ms 返回）",
+        not _speaker.available() or _spoken_ms >= 50,
+        f"{_spoken_ms}ms",
+    )
+
+    # 关窗时仍在跑的任务（检查更新、导出）会在主线程回到事件循环之后才返回，
+    # 那时信号宿主已销毁，`emit` 抛 RuntimeError。它只发生在退出路径上、没有
+    # 任何接收者，但 Qt 会把整段 traceback 打到 stderr——实测每一轮 GUI 冒烟
+    # 都以一段「Signal source has been deleted」收尾，看起来像崩溃。
+    import shiboken6  # noqa: PLC0415
+
+    from app.ui.workers import Worker as _Worker  # noqa: PLC0415
+    from app.ui.workers import WorkerSignals as _WorkerSignals  # noqa: PLC0415
+
+    _host = _WorkerSignals()
+    _bound = _host.succeeded
+    check("宿主还活着时发信号是成功的", _Worker._emit(_bound, None) is True)
+    shiboken6.delete(_host)
+    check("宿主已销毁时发信号只返回 False、不抛", _Worker._emit(_bound, None) is False)
+    # 自证：这条检查确实碰到了「源已删除」那种失败，而不是本来就不会抛。
+    _raised = False
+    try:
+        _bound.emit(None)
+    except RuntimeError:
+        _raised = True
+    check("（自证）直接 emit 已删除的源确实会抛", _raised)
+
+
+def _check_v16_features(tmpdir: Path) -> None:
+    """v1.6 新结构：归档列、归档读写、按添加时间取词条、「上次导出」锚点。
+
+    守的是「两个动作看起来一样、实际不一样」那一类缺陷：归档写成删除
+    （不可恢复）、归档后还留在复习队列里、重新查询没复活归档词、
+    `last_export_at` 格式不对导致增量导出悄悄漏词。四件事都不会报错，
+    只会在某个用户手里表现为「我明明归档了它还在」或「导出来少了几个」。
+    """
+    from datetime import datetime as _dt  # noqa: PLC0415
+
+    from app.config import _coerce_timestamp  # noqa: PLC0415
+    from app.core import review as _rv  # noqa: PLC0415
+    from app.core.db import ENTRIES_ADDED_COLUMNS as _ADDED  # noqa: PLC0415
+    from app.core.db import LEGACY_ENTRIES_DDL as _LEGACY  # noqa: PLC0415
+    from app.core.repository import STATE_ALL as _ALL  # noqa: PLC0415
+    from app.core.repository import STATE_ARCHIVED as _ARCH  # noqa: PLC0415
+    from app.core.repository import STATE_DUE as _DUE  # noqa: PLC0415
+
+    # ---- 两份声明一致 ----
+    _decl = _ADDED.get("archived_at", "").strip()
+    check(
+        "archived_at 在 DDL 与 ENTRIES_ADDED_COLUMNS 里都有",
+        "archived_at" in DDL and bool(_decl),
+        f"登记表={_decl!r}",
+    )
+    # DDL 里列名与类型之间是对齐空格，两边归一化空白再比，比的是声明本身。
+    check(
+        "archived_at 的两份声明是同一个建列串",
+        bool(_decl)
+        and " ".join(f"archived_at {_decl}".split()) in " ".join(DDL.split()),
+        f"登记表={_decl!r}",
+    )
+
+    # ---- 旧库补列 ----
+    _old_path = tmpdir / "v16old.db"
+    _old_conn = connect(_old_path)
+    try:
+        _old_conn.executescript(_LEGACY)
+        _before = {r[1] for r in _old_conn.execute("PRAGMA table_info(entries)")}
+        check(
+            "冻结快照里本来没有 archived_at（否则下面的补列断言是空话）",
+            "archived_at" not in _before,
+            str(sorted(_before)),
+        )
+        init_db(_old_conn)
+        _after = {r[1] for r in _old_conn.execute("PRAGMA table_info(entries)")}
+        check(
+            "旧库经 init_db 后补出 archived_at",
+            "archived_at" in _after,
+            str(sorted(_after)),
+        )
+    finally:
+        _old_conn.close()
+
+    # ---- 归档读写 ----
+    _path = tmpdir / "v16arc.db"
+    _conn = connect(_path)
+    try:
+        init_db(_conn)
+        _repo = Repository(_conn)
+        for _lemma, _pos in (("alpha", "n."), ("beta", "v."), ("gamma", "n.")):
+            _repo.upsert(Entry(lemma=_lemma, definition_zh=_lemma, pos=_pos, tags="考研"))
+
+        # 取真实当前时间而不是写死一个时刻：新词条的 `review_due` 由
+        # `upsert` 播种成「此刻」，写死一个早于此刻的参照时间会让
+        # 「到期待复习」判成 0，而那条断言看起来像归档逻辑坏了。
+        _now = _dt.now()
+        _base = _repo.count()
+        _beta = _repo.get("beta")
+        check("归档返回 True（确实改到了行）", _repo.archive(_beta.id, _now) is True)
+        check("归档后生词本少一条", _repo.count() == _base - 1, f"{_repo.count()}/{_base}")
+        check("归档单独计数", _repo.count_archived() == 1)
+        check(
+            "归档词不在生词本列表里",
+            "beta" not in [e.lemma for e in _repo.list_entries()],
+            str([e.lemma for e in _repo.list_entries()]),
+        )
+        check(
+            "归档列表只有归档的词",
+            [e.lemma for e in _repo.list_entries(archived=True)] == ["beta"],
+        )
+        _row = _repo.get("beta")
+        check("归档时间写进去了", bool(_row.archived_at), repr(_row.archived_at))
+        check("归档清空了复习到期时间", _row.review_due == "", repr(_row.review_due))
+        check(
+            "重复归档返回 False（不刷新时间戳）",
+            _repo.archive(_beta.id, _now) is False,
+        )
+
+        _stamp = _rv.format_timestamp(_now)
+        check(
+            "归档词不再进复习队列",
+            "beta" not in [e.lemma for e in _repo.due_entries(_stamp)],
+            str([e.lemma for e in _repo.due_entries(_stamp)]),
+        )
+        _counts = _repo.state_counts(_stamp)
+        check(
+            "状态计数把归档排除在「全部」之外",
+            _counts.get(_ALL) == _base - 1,
+            f"全部={_counts.get(_ALL)} 生词本={_base - 1}",
+        )
+        check(
+            "状态计数把归档单列一档",
+            _counts.get(_ARCH) == 1 and _counts.get(_DUE, 0) == _base - 1,
+            str(_counts),
+        )
+        check("搜索默认找不到归档词", _repo.search("beta") == [])
+        check(
+            "搜索归档池能找到",
+            [e.lemma for e in _repo.search("beta", archived=True)] == ["beta"],
+        )
+        check(
+            "词性计数不含归档",
+            dict(_repo.pos_counts()).get("v") is None,
+            str(_repo.pos_counts()),
+        )
+        check(
+            "标签计数不含归档",
+            dict(_repo.tag_counts()).get("考研") == _base - 1,
+            str(_repo.tag_counts()),
+        )
+        # 归档词不接受评分推进：它已经离开学习循环，再推进间隔只是给日后
+        # 放回来留一个谁也算不清的到期日。
+        _repo.apply_review(_beta.id, _rv.REMEMBERED, _now)
+        check(
+            "归档词不接受评分推进",
+            _repo.get("beta").review_due == "",
+            repr(_repo.get("beta").review_due),
+        )
+
+        check("恢复返回 True", _repo.unarchive(_beta.id, _now) is True)
+        _back = _repo.get("beta")
+        check("恢复后归档时间清空", _back.archived_at == "", repr(_back.archived_at))
+        check("恢复后重新排进复习队列", bool(_back.review_due), repr(_back.review_due))
+        check("恢复后复习间隔从零开始", _back.review_interval == 0.0)
+        check("恢复后回到生词本", _repo.count() == _base, str(_repo.count()))
+
+        # 重新查询要复活归档词：查一次就是「我现在要这个词」。
+        _repo.archive(_repo.get("beta").id, _now)
+        _repo.upsert(Entry(lemma="beta", definition_zh="重生", pos="v."))
+        check(
+            "重新查询一个词会撤销它的归档",
+            _repo.get("beta").archived_at == "",
+            repr(_repo.get("beta").archived_at),
+        )
+
+        # ---- 按添加时间取词条 ----
+        _conn.execute(
+            "UPDATE entries SET created_at = '2026-09-01 08:00:00' WHERE lemma = 'alpha'"
+        )
+        _conn.execute(
+            "UPDATE entries SET created_at = '2026-10-15 12:30:00' WHERE lemma = 'beta'"
+        )
+        _conn.execute(
+            "UPDATE entries SET created_at = '2026-11-10 09:00:00' WHERE lemma = 'gamma'"
+        )
+        _conn.commit()
+        check(
+            "日期区间取到范围内的词",
+            [
+                e.lemma
+                for e in _repo.entries_added_between(
+                    "2026-09-01 00:00:00", "2026-09-30 23:59:59"
+                )
+            ]
+            == ["alpha"],
+        )
+        check(
+            "区间外取不到词",
+            _repo.entries_added_between("2026-01-01 00:00:00", "2026-01-02 00:00:00")
+            == [],
+        )
+        _inclusive = [
+            e.lemma for e in _repo.entries_added_between("2026-09-01 08:00:00")
+        ]
+        _strict = [
+            e.lemma
+            for e in _repo.entries_added_between(
+                "2026-09-01 08:00:00", strict_start=True
+            )
+        ]
+        check("闭起点带上同一秒的词", "alpha" in _inclusive, str(_inclusive))
+        # 严格起点是「自上次导出以来」用的口径：上次导出那一刻的词已经在
+        # 那份文件里了，再导一次就是重复卡片。
+        check("严格起点不重复导出同一秒的词", "alpha" not in _strict, str(_strict))
+        check(
+            "最早添加时间取到最小的 created_at",
+            _repo.earliest_created() == "2026-09-01 08:00:00",
+            repr(_repo.earliest_created()),
+        )
+    finally:
+        _conn.close()
+
+    # ---- 「上次导出」锚点的格式 ----
+    check(
+        "合法的时间戳能存下来",
+        _coerce_timestamp("2026-11-11 10:00:00") == "2026-11-11 10:00:00",
+    )
+    check("空串表示还没导出过", _coerce_timestamp("") == "")
+    # 这个值直接与 created_at 做字符串比较。放一个 '2026/11/11' 进去不会报错，
+    # 只会让增量导出悄悄多给或少给一批词。
+    check("斜杠日期被拒（会破坏字典序比较）", _coerce_timestamp("2026/11/11") is None)
+    check("非字符串被拒", _coerce_timestamp(1811) is None)
+
+    # ---- 缺列的旧行 ----
+    _row_path = tmpdir / "v16row.db"
+    _row_conn = connect(_row_path)
+    try:
+        init_db(_row_conn)
+        _row_repo = Repository(_row_conn)
+        _row_repo.upsert(Entry(lemma="legacy", definition_zh="旧行"))
+        # 备份快照、迁移中途的库都可能喂来没有这一列的行走 this 分支。
+        _slim = _row_conn.execute(
+            "SELECT id, lemma, phonetic, pos, definition_en, definition_zh, example, "
+            "example_zh, synonyms_json, collocations_json, contextual_meaning, "
+            "usage_note, notes, tags, source, prompt_version, created_at, updated_at, "
+            "review_due, review_count, review_interval, review_ease "
+            "FROM entries LIMIT 1"
+        ).fetchone()
+        check(
+            "缺 archived_at 的旧行读成空串（不抛 IndexError）",
+            Entry.from_row(_slim).archived_at == "",
+        )
+    finally:
+        _row_conn.close()
+
+
+def _check_v17_features() -> None:
+    """v1.7 新结构：更新日志数据、版本校验、升级判定。
+
+    守两类错。一是发版时改了版本号却忘了写说明——程序不会报错，用户看到的是
+    欢迎页第一屏写着上一个版本号。二是版本比较在两位数次版本上才现形的那类
+    （`1.10.0` 按字典序比 `1.9.0` 小），而本项目的版本号刚好才走到 1.7。
+    """
+    from app.config import _coerce_version  # noqa: PLC0415
+    from app.core import changelog as cl  # noqa: PLC0415
+    from app.version import APP_VERSION as _VERSION  # noqa: PLC0415
+
+    APP_VERSION = _VERSION
+
+    # ---- 数据本身 ----
+    _problem = cl.audit()
+    check("更新日志形态合格（首条等于版本常量、倒序、无空条目）", not _problem, _problem)
+
+    _doc = Path(__file__).resolve().parents[1] / "CHANGELOG.md"
+    _doc_versions: set[str] = set()
+    for _line in _doc.read_text(encoding="utf-8").splitlines():
+        _stripped = _line.strip()
+        if _stripped.startswith("## v"):
+            _doc_versions.add(
+                _stripped[3:].strip().split("（")[0].strip().lstrip("v")
+            )
+    _code_versions = {item.version for item in cl.RELEASES}
+    check(
+        "CHANGELOG 里记过的版本都在更新日志里",
+        _doc_versions <= _code_versions,
+        f"缺={sorted(_doc_versions - _code_versions)}",
+    )
+
+    # ---- 自证：改坏了 audit 要能发现 ----
+    # 一条只会返回「没问题」的检查等于没检查。这里伪造三种坏数据，它必须
+    # 分别给出对应的问题描述。
+    _good = cl.RELEASES
+    _fake_wrong_head = (
+        cl.Release(version="0.0.1", date="2000-01-01", points=("x",)),
+    )
+    _fake_unordered = (
+        cl.Release(version=APP_VERSION, date="2026-11-11", points=("x",)),
+        cl.Release(version="9.9.9", date="2026-11-11", points=("x",)),
+    )
+    _fake_empty = (cl.Release(version=APP_VERSION, date="2026-11-11", points=()),)
+    check(
+        "（自证）首条版本不对时 audit 会指出",
+        "版本常量" in cl.audit(_fake_wrong_head),
+    )
+    check(
+        "（自证）乱序时 audit 会指出",
+        "严格早于" in cl.audit(_fake_unordered),
+    )
+    check("（自证）没有说明时 audit 会指出", "没有一条说明" in cl.audit(_fake_empty))
+    check("（自证）空集合也会被拦下", "没有任何版本说明" in cl.audit(()))
+    check("原始数据未被自证改动", cl.RELEASES is _good)
+
+    # ---- 取哪些版本 ----
+    check(
+        "当前版本之后没有可提示的版本",
+        cl.releases_since(APP_VERSION) == (),
+        f"多给了={[r.version for r in cl.releases_since(APP_VERSION)]}",
+    )
+    check(
+        "空锚点只给最新一条而不是全部历史",
+        [item.version for item in cl.releases_since("")] == [APP_VERSION],
+    )
+    check(
+        "跨版本升级按新到旧给全",
+        [item.version for item in cl.releases_since("1.0.0")]
+        == [item.version for item in cl.RELEASES[:-1]],
+    )
+    check(
+        "比现有版本还新的锚点不会倒给历史",
+        cl.releases_since("9.9.9") == (),
+    )
+    check(
+        "欢迎页最多摊三个版本",
+        len(cl.welcome_releases("1.0.0")) == cl.WELCOME_MAX_RELEASES,
+    )
+
+    # ---- 版本号校验 ----
+    check("版本校验接受三段数字", _coerce_version("1.7.0") == "1.7.0")
+    check("版本校验去掉 v 前缀", _coerce_version("v1.7.0") == "1.7.0")
+    check("版本校验拒绝非数字", _coerce_version("latest") is None)
+    check("版本校验拒绝五段", _coerce_version("1.2.3.4.5") is None)
+    check("空版本号合法（表示还没有锚点）", _coerce_version("") == "")
+    check("版本校验拒绝非字符串", _coerce_version(1.7) is None)
+
+
 def _selftest_leftover_prefixes() -> int:
     """自证残留检查的前缀表**取自 `clean_temp` 那一份**，而且**没有漏项**。
 
@@ -6769,6 +7486,7 @@ def _selftest_leftover_prefixes() -> int:
         f"  PASS  前缀表覆盖全仓所有 mkdtemp 前缀（{len(_collect_mkdtemp_prefixes())} 个）"
         "，并对空表自证过它会失败"
     )
+
     return 0
 
 

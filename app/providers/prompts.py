@@ -19,11 +19,16 @@ PROMPT_VERSION 参与缓存的有效性判定：
         改的是**输出结构**，所以必须递增：不递增的话，存量词条不会显示
         「按旧标准生成」，用户看到别人的词条有搭配区、自己的没有，只会以为
         程序坏了。
+  v3 —— 新增 `usage_note`（使用注意）与 `contextual_meaning`（语境中的含义）。
+        同样是输出结构变了：v2 的存量词条没有这两块，用户点开时会发现
+        「同一个词，别人的有使用注意，我的没有」。
+        注意 `contextual_meaning` **只在用户贴了上下文时**才有内容，没有上下文
+        时模型被要求输出空串——那一列空着是正常状态，不是缺项。
 """
 
 from __future__ import annotations
 
-PROMPT_VERSION = 2
+PROMPT_VERSION = 3
 
 SYSTEM_PROMPT = """你是一位面向中文母语学习者的英语词典编纂者。
 收到一个英语单词后，输出它的学习型词条。
@@ -44,6 +49,10 @@ SYSTEM_PROMPT = """你是一位面向中文母语学习者的英语词典编纂�
 6. example_zh 是该例句的中文翻译。
 7. phonetic 使用国际音标，含斜杠，例如 /juːˈbɪkwɪtəs/。
 8. pos 使用缩写形式，例如 adj. / n. / v. / adv.，有多个词性时用逗号分隔。
+9. usage_note 写这个词最容易用错或最容易忽略的地方，一到两句，不超过 60 字。写语域（正式 / 口语 / 贬义）、常见句型（多用于否定句、后接 to do）、易混点、可数不可数这类**词典里有、但释义里放不下**的信息。
+   这个词没有值得提醒的点时，usage_note 输出空字符串 ""。**不要为了填空而编**——「这是常用词」这类话对学习者没有任何用处。
+10. contextual_meaning 只有在用户提供了上下文时才写：说明这个词**在用户给的那段话里**具体指哪一层意思、指代什么、带什么态度，不超过 40 字。
+    用户没有提供上下文时，contextual_meaning 必须输出空字符串 ""。**不要拿通用释义填这一栏**，那会让用户以为程序读过他贴的句子。
 
 只输出一个 JSON 对象，不要输出任何解释文字或 Markdown 代码块。
 
@@ -56,6 +65,8 @@ JSON 结构：
   "definition_zh": "中文释义",
   "example": "英文例句",
   "example_zh": "例句的中文翻译",
+  "usage_note": "使用注意；没有可提醒的写空串",
+  "contextual_meaning": "该词在给定上下文中的具体含义；没有上下文写空串",
   "synonyms": [
     {"word": "同义词", "gloss_zh": "中文简释", "diff_note": "与主词的差异"}
   ],
@@ -65,8 +76,38 @@ JSON 结构：
 }"""
 
 
-def build_user_prompt(word: str) -> str:
-    return f"请为单词「{word}」生成词条。"
+# 上下文最多带多少字符进提示词。
+#
+# 用户可能直接把一整段文章粘进来。整篇塞进提示词有三个代价：token 成本、
+# 延迟、以及模型被无关内容带偏（一篇讲金融的文章里查 `charge`，它会把
+# 「收费」写成唯一含义）。600 字符大约是两三个句子，够定位语义，又不至于
+# 淹没主题。界面上的那个输入框也按这个数限制，两处同源。
+CONTEXT_LIMIT = 600
+
+
+def clamp_context(context: str) -> str:
+    """把用户贴的上下文规整到可送进提示词的长度。
+
+    折叠连续空白而不是原样保留：模型对换行的处理不稳定，而上下文里的换行
+    对语义没有贡献。超长时截断并补一个省略号——**不静默**，模型能看出
+    「这段没给全」，就不会假装读完了整篇。
+    """
+    text = " ".join((context or "").split())
+    if len(text) > CONTEXT_LIMIT:
+        return text[:CONTEXT_LIMIT].rstrip() + "…"
+    return text
+
+
+def build_user_prompt(word: str, context: str = "") -> str:
+    text = f"请为单词「{word}」生成词条。"
+    snippet = clamp_context(context)
+    if snippet:
+        text += (
+            "\n\n这个词出现在下面这段上下文里。请按它在这一处的意思写 "
+            "contextual_meaning——说清是哪一层意思、指代什么，不要重复通用释义：\n"
+            f"「{snippet}」"
+        )
+    return text
 
 
 # ---------- 词组 ----------

@@ -6,7 +6,7 @@
 
 [project]
 name = "arcquill"
-version = "1.4.1"
+version = "1.8.0"
 description = "本地优先的英语生词本桌面程序"
 readme = "README.md"
 requires-python = ">=3.11"

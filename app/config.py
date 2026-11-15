@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 from datetime import datetime
 from pathlib import Path
@@ -114,6 +115,21 @@ DEFAULT_CONFIG: dict = {
     # 提交报告时的署名，空表示还没填过。只为了下次不用重输，它不进统计、
     # 也不参与任何别的判断——删掉这一行等于清空预填，没有其他后果。
     "report_name": "",
+    # 启动后静默检查一次新版本。默认开启：不发任何用户数据，只是一次对
+    # GitHub Release 页面的读取（见 core/update.py 的说明）。关掉之后
+    # 完全不联网，设置页里那个「检查更新」按钮也会跟着隐藏。
+    "check_updates": True,
+    # 上一次导出成功的时间，'YYYY-MM-DD HH:MM:SS'，空串表示从没导出过。
+    # 「自上次导出以来」这一档直接拿它与 `created_at` 做字典序比较，所以
+    # 它的格式必须与库里一致，由 `_coerce_timestamp` 把住。
+    "last_export_at": "",
+    # 上次运行时的程序版本。空串有两种人：从没运行过（首装）、以及从没有这个
+    # 字段的旧版升上来。前者不该看到更新说明，后者该看到，所以判据是
+    # `onboard_version > 0`——走过欢迎页的一定不是首装。
+    "last_seen_version": "",
+    # 用户在欢迎页勾了「以后不再自动显示更新说明」。只关这一种提示：教程大改
+    # 时欢迎页照旧弹出来，只是第一屏回到功能列表。
+    "skip_update_note": False,
 }
 
 # 接入模式白名单。写在这里而不是散落在 UI 与 provider 里，避免各判一套。
@@ -312,6 +328,46 @@ def _coerce_int(value: object) -> int | None:
     return None
 
 
+def _coerce_timestamp(value: object) -> str | None:
+    """只认 `YYYY-MM-DD HH:MM:SS`，空串合法（表示「没有」）。
+
+    这个值会直接与库里的 `created_at` 做**字符串**比较（SQLite 里没有日期类型，
+    两边都是可字典序比较的定长文本）。放一个 '2026/11/10' 或 '昨天' 进去不会
+    报错，只会让「自上次导出以来」悄悄漏掉或重复一批词——而用户从结果上看不出
+    哪里不对。所以格式在这里把死。
+    """
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    if not text:
+        return ""
+    try:
+        datetime.strptime(text, "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        return None
+    return text
+
+
+_VERSION_RE = re.compile(r"^\d+(?:\.\d+){0,3}$")
+
+
+def _coerce_version(value: object) -> str | None:
+    """只认一到四段纯数字的版本号，空串合法（表示「还没有锚点」）。
+
+    这个值唯一的用途是与 `APP_VERSION` 逐位比较，决定升级后要不要显示更新
+    说明。写进 `'v1.7'` 或 `'latest'` 不会报错，只会让那条比较静默失效——
+    表现是「升级了但没提示」，而用户根本不知道本来该有提示。所以格式在这里卡死，
+    并且统一去掉 v 前缀，让比较两边形态一致。
+    """
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    if not text:
+        return ""
+    text = text.lstrip("vV")
+    return text if _VERSION_RE.match(text) else None
+
+
 _COERCERS: dict = {
     "provider": _coerce_provider,
     "base_url": _coerce_text,
@@ -329,6 +385,10 @@ _COERCERS: dict = {
     "analytics_consent_decided": _coerce_bool,
     "analytics_schema_version": _coerce_int,
     "report_name": _coerce_text,
+    "check_updates": _coerce_bool,
+    "last_export_at": _coerce_timestamp,
+    "last_seen_version": _coerce_version,
+    "skip_update_note": _coerce_bool,
     # 必须登记在这里。save_config() 只保存 _COERCERS 里出现过的字段，
     # 漏登记的表现是「在设置里关掉兜底、重启后又自己打开了」——
     # 开关形同虚设，而且不会报任何错。
